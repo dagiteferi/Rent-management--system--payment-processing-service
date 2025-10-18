@@ -17,10 +17,37 @@ def mock_settings_encryption_key_and_webhook_secret():
         yield
 
 @pytest.mark.asyncio
-async def test_health_check(client: AsyncClient):
-    response = await client.get("/health")
+async def test_health_check_success(client: AsyncClient, mock_chapa_service):
+    # Mock DB connection to be successful (default behavior of test_db fixture)
+    # Mock Chapa service to return success for get_banks
+    mock_chapa_service.get_banks.return_value = AsyncMock(status="success", data=[{"name": "Bank A"}])
+
+    response = await client.get("/api/v1/health")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "message": "Payment Processing Microservice is running"}
+    assert response.json() == {"status": "healthy", "db": "ok", "chapa_api": "ok"}
+
+@pytest.mark.asyncio
+async def test_health_check_db_failure(client: AsyncClient, mock_chapa_service, test_db):
+    # Mock DB connection to fail
+    with patch.object(test_db, 'execute', side_effect=Exception("DB connection error")):
+        response = await client.get("/api/v1/health")
+        assert response.status_code == 503
+        assert response.json()['status'] == "healthy"
+        assert response.json()['db'] == "error"
+        assert "DB connection error" in response.json()['db_error']
+        assert response.json()['chapa_api'] == "ok"
+
+@pytest.mark.asyncio
+async def test_health_check_chapa_failure(client: AsyncClient, mock_chapa_service):
+    # Mock Chapa service to fail for get_banks
+    mock_chapa_service.get_banks.side_effect = Exception("Chapa API error")
+
+    response = await client.get("/api/v1/health")
+    assert response.status_code == 503
+    assert response.json()['status'] == "healthy"
+    assert response.json()['db'] == "ok"
+    assert response.json()['chapa_api'] == "error"
+    assert "Chapa API error" in response.json()['chapa_api_error']
 
 @pytest.mark.asyncio
 async def test_initiate_payment_success(
@@ -55,7 +82,7 @@ async def test_initiate_payment_success(
     assert payment_in_db.request_id == request_id
 
 @pytest.mark.asyncio
-async def test_initiate_payment_idempotency(
+async def test_initiate_payment_idempotency_same_request_id(
     client: AsyncClient,
     mock_chapa_service,
     mock_auth_dependency,
@@ -84,6 +111,40 @@ async def test_initiate_payment_idempotency(
     assert response2.json()['id'] == response1.json()['id']
     mock_chapa_service.initialize_payment.assert_not_called() # Should not call Chapa again
     mock_notification_service.send_notification.assert_not_called() # Should not send notification again
+
+@pytest.mark.asyncio
+async def test_initiate_payment_idempotency_different_property_id_same_request_id(
+    client: AsyncClient,
+    mock_chapa_service,
+    mock_auth_dependency,
+    mock_notification_service,
+    test_db,
+    create_payment
+):
+    owner_user_id = mock_auth_dependency['owner'].return_value.user_id
+    request_id = uuid.uuid4()
+    property_id_1 = uuid.uuid4()
+    property_id_2 = uuid.uuid4()
+
+    payment_data_1 = {"request_id": str(request_id), "property_id": str(property_id_1), "user_id": str(owner_user_id), "amount": 100.00}
+    payment_data_2 = {"request_id": str(request_id), "property_id": str(property_id_2), "user_id": str(owner_user_id), "amount": 100.00}
+
+    # First call - creates the payment for property_id_1
+    response1 = await client.post("/api/v1/payments/initiate", json=payment_data_1)
+    assert response1.status_code == 202
+    assert response1.json()['property_id'] == str(property_id_1)
+
+    # Reset mocks for second call
+    mock_chapa_service.initialize_payment.reset_mock()
+    mock_notification_service.send_notification.reset_mock()
+
+    # Second call with the same request_id but different property_id - should return existing payment for property_id_1
+    response2 = await client.post("/api/v1/payments/initiate", json=payment_data_2)
+    assert response2.status_code == 202
+    assert response2.json()['id'] == response1.json()['id']
+    assert response2.json()['property_id'] == str(property_id_1) # Should still be property_id_1
+    mock_chapa_service.initialize_payment.assert_not_called()
+    mock_notification_service.send_notification.assert_not_called()
 
 @pytest.mark.asyncio
 async def test_initiate_payment_not_owner(

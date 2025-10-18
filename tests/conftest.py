@@ -63,6 +63,8 @@ def mock_chapa_service():
         )
         # Mock webhook signature verification
         mock_chapa.verify_webhook_signature.return_value = True
+        # Mock for health check
+        mock_chapa.get_banks.return_value = AsyncMock(status="success", data=[{"name": "Bank A"}])
         yield mock_chapa
 
 @pytest_asyncio.fixture
