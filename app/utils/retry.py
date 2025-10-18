@@ -1,8 +1,7 @@
 import asyncio
-import logging
 from functools import wraps
 
-logger = logging.getLogger(__name__)
+from app.core.logging import logger # Import structured logger
 
 def async_retry(max_attempts: int = 3, delay: float = 1.0, backoff_factor: float = 2.0, exceptions=(Exception,)): # noqa
     """
@@ -22,13 +21,13 @@ def async_retry(max_attempts: int = 3, delay: float = 1.0, backoff_factor: float
                 try:
                     return await func(*args, **kwargs)
                 except exceptions as e:
-                    logger.warning(f"Attempt {attempt} failed for {func.__name__}: {e}")
+                    logger.warning("Attempt failed for function", function_name=func.__name__, attempt=attempt, error=str(e))
                     if attempt < max_attempts:
-                        logger.info(f"Retrying {func.__name__} in {current_delay:.2f} seconds...")
+                        logger.info("Retrying function", function_name=func.__name__, delay=f"{current_delay:.2f}s")
                         await asyncio.sleep(current_delay)
                         current_delay *= backoff_factor
                     else:
-                        logger.error(f"All {max_attempts} attempts failed for {func.__name__}.")
+                        logger.error("All attempts failed for function", function_name=func.__name__, max_attempts=max_attempts)
                         raise
         return wrapper
     return decorator
