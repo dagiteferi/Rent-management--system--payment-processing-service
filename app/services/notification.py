@@ -61,8 +61,8 @@ class NotificationService:
                     "message": "ውድ የቤት ባለቤት፣ ለንብረትዎ {property_id} ክፍያ አልተሳካም። እባክዎ እንደገና ይሞክሩ።"
                 },
                 "payment_timed_out": {
-                    "subject": "ክፍያ ጊዜው አልፎበታል - እርምጃ ያስፈልጋል",
-                    "message": "ውድ የቤት ባለቤት፣ ለንብረትዎ {property_id} በመጠባበቅ ላይ የነበረው ክፍያ ጊዜው አልፎበታል እና አልተሳካም። እባክዎ እንደገና ይሞክሩ።"
+                    "subject": "ክፍያ ጊዜው አልፏል - እርምጃ ያስፈልጋል",
+                    "message": "ውድ የቤት ባለቤት፣ ለንብረትዎ {property_id} በመጠባበቅ ላይ የነበረው ክፍያ ጊዜው አልፏል እና አልተሳካም። እባክዎ እንደገና ይሞክሩ።"
                 }
             },
             "om": {
@@ -79,8 +79,8 @@ class NotificationService:
                     "message": "Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {property_id} milkaa'uu dideera. Maaloo deebisanii yaalaa."
                 },
                 "payment_timed_out": {
-                    "subject": "Kaffaltiin Yeroo Darbeera - Tarkaanfii Barbaachisaadha",
-                    "message": "Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {property_id} yeroo darbeera. Maaloo deebisanii yaalaa."
+                    "subject": "Kaffaltiin Yeroo Isaa Darbe - Tarkaanfii Barbaachisaadha",
+                    "message": "Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {property_id} yeroo isaa darbeera. Maaloo deebisanii yaalaa."
                 }
             }
         }
