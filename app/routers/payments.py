@@ -27,6 +27,40 @@ from fastapi_limiter.depends import RateLimiter
 
 router = APIRouter()
 
+@router.get("/health", summary="Health Check")
+async def health_check(db: AsyncSession = Depends(get_db)):
+    """
+    Performs a health check on the service, including database and Chapa API connectivity.
+    """
+    health_status = {"status": "healthy"}
+
+    # Check Database Connection
+    try:
+        await db.execute(select(1))
+        health_status["db"] = "ok"
+    except Exception as e:
+        logger.error("Health check failed: Database connection error", error=str(e))
+        health_status["db"] = "error"
+        health_status["db_error"] = str(e)
+
+    # Check Chapa API Availability (e.g., by trying to verify a dummy transaction or hitting a health endpoint)
+    try:
+        # A simple GET request to Chapa's base URL or a non-sensitive endpoint
+        # Note: Chapa doesn't have a public health endpoint, so we'll simulate a light call
+        async with httpx.AsyncClient() as client:
+            response = await client.get(f"{settings.CHAPA_BASE_URL}/transaction/banks", timeout=3)
+            response.raise_for_status()
+            health_status["chapa_api"] = "ok"
+    except Exception as e:
+        logger.error("Health check failed: Chapa API error", error=str(e))
+        health_status["chapa_api"] = "error"
+        health_status["chapa_api_error"] = str(e)
+
+    if health_status["db"] == "error" or health_status["chapa_api"] == "error":
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=health_status)
+
+    return health_status
+
 @router.post("/payments/initiate", response_model=PaymentResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(RateLimiter(times=10, seconds=60))])
 async def initiate_payment(
     payment_create: PaymentCreate,
@@ -110,7 +144,7 @@ async def initiate_payment(
         await db.commit()
         await db.refresh(new_payment)
 
-        logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=new_owner.user_id, property_id=new_payment.property_id, checkout_url=checkout_url)
+        logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=current_owner.user_id, property_id=new_payment.property_id, checkout_url=checkout_url)
 
         # Notify landlord about pending payment using the new notification service
         await notification_service.send_notification(
@@ -235,7 +269,7 @@ async def chapa_webhook(
     # For this project, given the constraints, we'll iterate and decrypt.
     found_payment = None
     # Only query for PENDING payments to reduce search space
-    pending_payments_stmt = select(Payment).where(Payment.status == PaymentStatus.PENDING)
+    pending_payments_stmt = select(Payment).where(Payment.status == PaymentStatus.PENDING))
     pending_payments_result = await db.execute(pending_payments_stmt)
     all_pending_payments = pending_payments_result.scalars().all()
 
