@@ -30,23 +30,9 @@ async def get_db():
 # Scheduler setup
 scheduler = AsyncIOScheduler()
 
-@async_retry(max_attempts=3, delay=1, exceptions=(httpx.RequestError, HTTPException))
-async def notify_landlord_external(payload):
-    """Sends notification to the external Notification Service."""
-    async with httpx.AsyncClient() as client:
-        try:
-            response = await client.post(f"{settings.NOTIFICATION_SERVICE_URL}/notifications/send", json=payload, timeout=5)
-            response.raise_for_status()
-            logger.info("Notification sent successfully via external service", user_id=payload.get('user_id'), subject=payload.get('subject'))
-        except httpx.RequestError as exc:
-            logger.error("Notification service request error", user_id=payload.get('user_id'), error=str(exc))
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Notification service unavailable")
-        except httpx.HTTPStatusError as exc:
-            logger.error("Notification service HTTP error", user_id=payload.get('user_id'), status_code=exc.response.status_code, response_text=exc.response.text)
-            raise HTTPException(status_code=exc.response.status_code, detail="Notification service error")
-
 async def timeout_pending_payments():
-    logger.info("Running timeout job for pending payments...")
+    payments.metrics_counters["timeout_jobs_run"] += 1
+    logger.info("Running timeout job for pending payments...", service="payment")
     async with AsyncSessionLocal() as db:
         seven_days_ago = datetime.now() - timedelta(days=settings.PAYMENT_TIMEOUT_DAYS)
         pending_payments = await db.execute(
@@ -61,7 +47,11 @@ async def timeout_pending_payments():
             payment.status = PaymentStatus.FAILED
             payment.updated_at = datetime.now()
             db.add(payment)
-            logger.info("Payment timed out and marked as FAILED.", payment_id=payment.id, user_id=payment.user_id)
+            logger.info("Payment timed out and marked as FAILED.", payment_id=payment.id, user_id=payment.user_id, service="payment")
+
+            # Update metrics
+            payments.metrics_counters["pending_payments"] -= 1
+            payments.metrics_counters["failed_payments"] += 1
 
             # Notify landlord using the new notification service
             # Placeholder for user details, ideally fetched from User Management
@@ -83,20 +73,20 @@ async def timeout_pending_payments():
                     }
                 )
             except Exception as e:
-                logger.error("Failed to send timeout notification.", payment_id=payment.id, error=str(e))
+                logger.error("Failed to send timeout notification.", payment_id=payment.id, error=str(e), service="payment")
 
         await db.commit()
-    logger.info("Timeout job for pending payments completed.")
+    logger.info("Timeout job for pending payments completed.", service="payment")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup
-    logger.info("Payment Processing Microservice starting up...")
+    logger.info("Payment Processing Microservice starting up...", service="payment")
 
     # Initialize FastAPI-Limiter
     redis_connection = redis.from_url(settings.REDIS_URL, encoding="utf8", decode_responses=True)
     await FastAPILimiter.init(redis_connection)
-    logger.info("FastAPILimiter initialized with Redis.")
+    logger.info("FastAPILimiter initialized with Redis.", service="payment")
 
     scheduler.add_job(
         timeout_pending_payments,
@@ -105,19 +95,15 @@ async def lifespan(app: FastAPI):
         replace_existing=True
     )
     scheduler.start()
-    logger.info("Scheduler started.")
+    logger.info("Scheduler started.", service="payment")
     yield
     # Shutdown
-    logger.info("Payment Processing Microservice shutting down...")
+    logger.info("Payment Processing Microservice shutting down...", service="payment")
     scheduler.shutdown()
-    logger.info("Scheduler shut down.")
+    logger.info("Scheduler shut down.", service="payment")
     await FastAPILimiter.close()
-    logger.info("FastAPILimiter closed.")
+    logger.info("FastAPILimiter closed.", service="payment")
 
 app = FastAPI(lifespan=lifespan, title="Payment Processing Microservice", version="1.0.0")
 
 app.include_router(payments.router, prefix="/api/v1")
-
-@app.get("/health")
-async def health_check():
-    return {"status": "ok", "message": "Payment Processing Microservice is running"}
