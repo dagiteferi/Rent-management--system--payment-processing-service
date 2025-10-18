@@ -10,6 +10,7 @@ This microservice handles payment initiation, verification, and status updates f
 - [API Endpoints](#api-endpoints)
 - [Chapa Sandbox Setup](#chapa-sandbox-setup)
 - [Frontend Integration Guidance](#frontend-integration-guidance)
+- [Demo Walkthrough](#demo-walkthrough)
 - [Testing](#testing)
 
 ## Setup
@@ -209,6 +210,80 @@ const PaymentStatusChecker = ({ paymentId, jwtToken }) => {
 
 export default PaymentStatusChecker;
 ```
+
+## Demo Walkthrough
+
+This section provides a step-by-step guide for demonstrating the Payment Processing Microservice during a school presentation.
+
+**Prerequisites:**
+*   The Payment Processing Microservice is running (e.g., `uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload`).
+*   A PostgreSQL database is set up and migrated (`./migrate.sh`).
+*   `.env` file is correctly configured with `CHAPA_API_KEY`, `CHAPA_SECRET_KEY`, `CHAPA_WEBHOOK_SECRET`, `USER_MANAGEMENT_URL`, etc.
+*   Chapa.co sandbox account is set up, and a webhook URL pointing to your public service endpoint (`YOUR_SERVICE_PUBLIC_URL/api/v1/webhook/chapa`) is configured.
+*   (Conceptual) A User Management Microservice is running and can issue JWTs for an 'Owner' role.
+*   (Conceptual) A Property Listing Microservice is running.
+
+**Scenario: Landlord Posts a Property Listing**
+
+1.  **Login as an Owner (Conceptual):**
+    *   Explain that a landlord (Owner) would first log into the Rental Management System, obtaining a JWT token from the User Management Microservice.
+    *   *For demo:* Assume you have a valid JWT for an Owner user (e.g., `eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...`).
+
+2.  **Initiate Payment for a Listing:**
+    *   The landlord decides to post a new property listing. This action requires a payment.
+    *   **API Call (using `curl` or Postman):**
+        ```bash
+        # Replace <OWNER_JWT_TOKEN>, <PROPERTY_UUID>, <OWNER_USER_UUID> with actual values
+        # Generate a new UUID for request_id for each initiation attempt
+        curl -X POST "http://localhost:8000/api/v1/payments/initiate" \
+             -H "Authorization: Bearer <OWNER_JWT_TOKEN>" \
+             -H "Content-Type: application/json" \
+             -d '{ 
+                   "request_id": "<GENERATE_NEW_UUID_HERE>", 
+                   "property_id": "<PROPERTY_UUID>", 
+                   "user_id": "<OWNER_USER_UUID>", 
+                   "amount": 100.00 
+                 }'
+        ```
+    *   **Expected Output:** A `202 Accepted` response containing the `payment_id` and a `chapa_tx_ref` which is the Chapa checkout URL. Note down the `payment_id` and the `checkout_url`.
+    *   **Demonstrate Idempotency:** Make the *exact same* `curl` request again (same `request_id`). Show that the service returns the *same* `payment_id` and `checkout_url`, and no new payment record is created in the database (you can verify this by checking the database directly or observing logs). This highlights that the payment was not re-initiated.
+
+3.  **Complete Payment via Chapa Sandbox:**
+    *   Open the `checkout_url` obtained in the previous step in a web browser.
+    *   Explain that this is the Chapa.co sandbox payment page.
+    *   Select a payment method (e.g., CBE Birr, Telebirr, or a test card like `4111 1111 1111 1111` for Visa).
+    *   Complete the payment process. Chapa will simulate a successful transaction.
+    *   Explain that upon successful payment, Chapa will redirect back to the `return_url` configured during initiation (e.g., your frontend's payment status page).
+
+4.  **Verify Webhook Processing:**
+    *   Show the microservice's console/logs. You should see log entries indicating: `Received Chapa webhook`, `Chapa webhook signature verified successfully`, `Chapa payment verification successful`, `Payment status updated to SUCCESS`, and `Property approved via Property Listing Service.`
+    *   This demonstrates the automated update of payment status and the trigger for listing approval.
+
+5.  **Check Payment Status (Frontend Polling Simulation):**
+    *   **API Call (using `curl` or Postman):**
+        ```bash
+        # Replace <OWNER_JWT_TOKEN> and <PAYMENT_ID> from step 2
+        curl -X GET "http://localhost:8000/api/v1/payments/<PAYMENT_ID>/status" \
+             -H "Authorization: Bearer <OWNER_JWT_TOKEN>"
+        ```
+    *   **Expected Output:** A `200 OK` response with `status: SUCCESS`.
+    *   Explain that a frontend application would typically poll this endpoint to update the user interface in real-time, as shown in the `PaymentStatusChecker.jsx` snippet in the Frontend Integration Guidance section.
+
+6.  **Verify Listing Approval (Conceptual):**
+    *   Explain that at this point, the Property Listing Microservice would have received the approval signal and marked the property as available for tenant searches.
+
+7.  **Demonstrate Multilingual Notifications (Conceptual):**
+    *   Explain that the landlord would have received an email/SMS notification in their `preferred_language` (e.g., Amharic) confirming the payment success and listing approval. Refer to the `app/services/notification.py` file to show the different language templates.
+
+8.  **Health Check Demonstration:**
+    *   **API Call:**
+        ```bash
+        curl -X GET "http://localhost:8000/api/v1/health"
+        ```
+    *   **Expected Output:** A `200 OK` response with `{"status": "healthy", "db": "ok", "chapa_api": "ok"}`.
+    *   Explain that this endpoint is crucial for monitoring the service's operational status in a production environment.
+
+This walkthrough covers the full lifecycle of a payment, showcasing the microservice's core functionalities, security features, and integrations, making it ideal for a school demo.
 
 ## Testing
 
