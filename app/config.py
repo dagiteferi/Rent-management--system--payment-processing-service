@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     NOTIFICATION_SERVICE_URL: str
     PROPERTY_LISTING_SERVICE_URL: str
     ENCRYPTION_KEY: str # Must be 32 bytes for AES-256
+    REDIS_URL: str # Added for rate limiting and optional caching
 
     # Chapa specific settings
     CHAPA_BASE_URL: str = "https://api.chapa.co/v1"
