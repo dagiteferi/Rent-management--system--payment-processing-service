@@ -3,15 +3,17 @@ from httpx import AsyncClient
 from unittest.mock import AsyncMock, patch
 import uuid
 from datetime import datetime, timedelta
+import json
 
 from app.models.payment import Payment, PaymentStatus
 from app.core.security import encrypt_data, decrypt_data
 from app.config import settings
 
-# Mock settings for testing encryption key
+# Mock settings for testing encryption key and webhook secret
 @pytest.fixture(autouse=True)
-def mock_settings_encryption_key():
-    with patch('app.config.settings.ENCRYPTION_KEY', "a_32_byte_secret_key_for_aes_encryption"):
+def mock_settings_encryption_key_and_webhook_secret():
+    with patch('app.config.settings.ENCRYPTION_KEY', "a_32_byte_secret_key_for_aes_encryption"), \
+         patch('app.config.settings.CHAPA_WEBHOOK_SECRET', "test_webhook_secret"):
         yield
 
 @pytest.mark.asyncio
@@ -28,9 +30,10 @@ async def test_initiate_payment_success(
     mock_notification_service,
     test_db
 ):
-    owner_user_id = mock_auth_dependency['owner'].return_value['user_id']
+    owner_user_id = mock_auth_dependency['owner'].return_value.user_id
     property_id = uuid.uuid4()
-    payment_data = {"property_id": str(property_id), "user_id": str(owner_user_id), "amount": 100.00}
+    request_id = uuid.uuid4()
+    payment_data = {"request_id": str(request_id), "property_id": str(property_id), "user_id": str(owner_user_id), "amount": 100.00}
 
     response = await client.post("/api/v1/payments/initiate", json=payment_data)
 
@@ -42,13 +45,45 @@ async def test_initiate_payment_success(
     assert "checkout_url" in response_json['chapa_tx_ref'] # chapa_tx_ref returns checkout_url for simplicity
 
     mock_chapa_service.initialize_payment.assert_called_once()
-    mock_notification_service.assert_called_once()
+    mock_notification_service.send_notification.assert_called_once()
 
     # Verify payment is in DB
     payment_in_db = await test_db.get(Payment, uuid.UUID(response_json['id']))
     assert payment_in_db is not None
     assert payment_in_db.status == PaymentStatus.PENDING
     assert decrypt_data(payment_in_db.chapa_tx_ref).startswith("tx-")
+    assert payment_in_db.request_id == request_id
+
+@pytest.mark.asyncio
+async def test_initiate_payment_idempotency(
+    client: AsyncClient,
+    mock_chapa_service,
+    mock_auth_dependency,
+    mock_notification_service,
+    test_db,
+    create_payment
+):
+    owner_user_id = mock_auth_dependency['owner'].return_value.user_id
+    property_id = uuid.uuid4()
+    request_id = uuid.uuid4()
+    payment_data = {"request_id": str(request_id), "property_id": str(property_id), "user_id": str(owner_user_id), "amount": 100.00}
+
+    # First call - creates the payment
+    response1 = await client.post("/api/v1/payments/initiate", json=payment_data)
+    assert response1.status_code == 202
+    mock_chapa_service.initialize_payment.assert_called_once()
+    mock_notification_service.send_notification.assert_called_once()
+
+    # Reset mocks for second call
+    mock_chapa_service.initialize_payment.reset_mock()
+    mock_notification_service.send_notification.reset_mock()
+
+    # Second call with the same request_id - should return existing payment
+    response2 = await client.post("/api/v1/payments/initiate", json=payment_data)
+    assert response2.status_code == 202
+    assert response2.json()['id'] == response1.json()['id']
+    mock_chapa_service.initialize_payment.assert_not_called() # Should not call Chapa again
+    mock_notification_service.send_notification.assert_not_called() # Should not send notification again
 
 @pytest.mark.asyncio
 async def test_initiate_payment_not_owner(
@@ -59,7 +94,8 @@ async def test_initiate_payment_not_owner(
     mock_auth_dependency['owner'].side_effect = HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owners can perform this action")
 
     property_id = uuid.uuid4()
-    payment_data = {"property_id": str(property_id), "user_id": str(uuid.uuid4()), "amount": 100.00}
+    request_id = uuid.uuid4()
+    payment_data = {"request_id": str(request_id), "property_id": str(property_id), "user_id": str(uuid.uuid4()), "amount": 100.00}
 
     response = await client.post("/api/v1/payments/initiate", json=payment_data)
 
@@ -73,7 +109,7 @@ async def test_get_payment_status_success(
     create_payment,
     test_db
 ):
-    user_id = mock_auth_dependency['user'].return_value['user_id']
+    user_id = mock_auth_dependency['user'].return_value.user_id
     payment = await create_payment(user_id=user_id, chapa_tx_ref=encrypt_data("test-tx-ref-123"))
 
     response = await client.get(f"/api/v1/payments/{payment.id}/status")
@@ -106,7 +142,7 @@ async def test_get_payment_status_unauthorized_user(
     payment = await create_payment(user_id=other_user_id, chapa_tx_ref=encrypt_data("test-tx-ref-456"))
 
     # Current user is mocked as a Tenant, not the owner of this payment
-    current_user_id = mock_auth_dependency['user'].return_value['user_id']
+    current_user_id = mock_auth_dependency['user'].return_value.user_id
     assert current_user_id != other_user_id
 
     response = await client.get(f"/api/v1/payments/{payment.id}/status")
@@ -121,7 +157,8 @@ async def test_chapa_webhook_success(
     mock_property_listing_service,
     mock_get_user_details_for_notification,
     create_payment,
-    test_db
+    test_db,
+    generate_chapa_webhook_signature
 ):
     original_tx_ref = "webhook-test-tx-ref-789"
     encrypted_tx_ref = encrypt_data(original_tx_ref)
@@ -138,16 +175,18 @@ async def test_chapa_webhook_success(
             "meta": {"user_id": str(payment.user_id), "property_id": str(payment.property_id)}
         }
     }
+    payload_body = json.dumps(webhook_payload).encode('utf-8')
+    signature = generate_chapa_webhook_signature(payload_body)
 
-    response = await client.post("/api/v1/webhook/chapa", json=webhook_payload)
+    response = await client.post("/api/v1/webhook/chapa", json=webhook_payload, headers={"X-Chapa-Signature": signature})
 
     assert response.status_code == 200
     assert response.json() == {"message": "Webhook processed successfully"}
 
-    mock_chapa_service.verify_webhook_signature.assert_called_once()
+    mock_chapa_service.verify_webhook_signature.assert_called_once_with(payload_body, signature)
     mock_chapa_service.verify_payment.assert_called_once_with(original_tx_ref)
     mock_property_listing_service.assert_called_once_with(payment.property_id)
-    mock_notification_service.assert_called_once()
+    mock_notification_service.send_notification.assert_called_once()
     mock_get_user_details_for_notification.assert_called_once_with(payment.user_id)
 
     # Verify payment status updated in DB
@@ -155,12 +194,38 @@ async def test_chapa_webhook_success(
     assert updated_payment.status == PaymentStatus.SUCCESS
 
 @pytest.mark.asyncio
+async def test_chapa_webhook_invalid_signature(
+    client: AsyncClient,
+    mock_chapa_service,
+    generate_chapa_webhook_signature
+):
+    webhook_payload = {
+        "event": "charge.success",
+        "data": {
+            "tx_ref": "some-tx-ref",
+            "status": "success",
+            "amount": 100,
+            "currency": "ETB",
+            "meta": {"user_id": str(uuid.uuid4()), "property_id": str(uuid.uuid4())}
+        }
+    }
+    payload_body = json.dumps(webhook_payload).encode('utf-8')
+    invalid_signature = generate_chapa_webhook_signature(payload_body, secret="wrong_secret")
+
+    response = await client.post("/api/v1/webhook/chapa", json=webhook_payload, headers={"X-Chapa-Signature": invalid_signature})
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Invalid webhook signature"}
+    mock_chapa_service.verify_webhook_signature.assert_called_once_with(payload_body, invalid_signature)
+
+@pytest.mark.asyncio
 async def test_chapa_webhook_failed_status(
     client: AsyncClient,
     mock_chapa_service,
     mock_notification_service,
     create_payment,
-    test_db
+    test_db,
+    generate_chapa_webhook_signature
 ):
     original_tx_ref = "webhook-test-tx-ref-failed"
     encrypted_tx_ref = encrypt_data(original_tx_ref)
@@ -189,14 +254,17 @@ async def test_chapa_webhook_failed_status(
             "meta": {"user_id": str(payment.user_id), "property_id": str(payment.property_id)}
         }
     }
+    payload_body = json.dumps(webhook_payload).encode('utf-8')
+    signature = generate_chapa_webhook_signature(payload_body)
 
-    response = await client.post("/api/v1/webhook/chapa", json=webhook_payload)
+    response = await client.post("/api/v1/webhook/chapa", json=webhook_payload, headers={"X-Chapa-Signature": signature})
 
     assert response.status_code == 200
     assert response.json() == {"message": "Webhook processed successfully"}
 
+    mock_chapa_service.verify_webhook_signature.assert_called_once_with(payload_body, signature)
     mock_chapa_service.verify_payment.assert_called_once_with(original_tx_ref)
-    mock_notification_service.assert_called_once()
+    mock_notification_service.send_notification.assert_called_once()
 
     # Verify payment status updated in DB
     updated_payment = await test_db.get(Payment, payment.id)
@@ -205,7 +273,8 @@ async def test_chapa_webhook_failed_status(
 @pytest.mark.asyncio
 async def test_chapa_webhook_payment_not_found(
     client: AsyncClient,
-    mock_chapa_service
+    mock_chapa_service,
+    generate_chapa_webhook_signature
 ):
     webhook_payload = {
         "event": "charge.success",
@@ -218,11 +287,14 @@ async def test_chapa_webhook_payment_not_found(
             "meta": {"user_id": str(uuid.uuid4()), "property_id": str(uuid.uuid4())}
         }
     }
+    payload_body = json.dumps(webhook_payload).encode('utf-8')
+    signature = generate_chapa_webhook_signature(payload_body)
 
-    response = await client.post("/api/v1/webhook/chapa", json=webhook_payload)
+    response = await client.post("/api/v1/webhook/chapa", json=webhook_payload, headers={"X-Chapa-Signature": signature})
 
-    assert response.status_code == 404
-    assert response.json() == {"detail": "Payment not found or not in PENDING state"}
+    assert response.status_code == 200 # Should return 200 even if not found to avoid Chapa retries
+    assert response.json() == {"message": "Payment not found or not in PENDING state, no action taken"}
+    mock_chapa_service.verify_webhook_signature.assert_called_once_with(payload_body, signature)
 
 @pytest.mark.asyncio
 async def test_timeout_pending_payments_job(
@@ -257,7 +329,7 @@ async def test_timeout_pending_payments_job(
     # Verify old pending payment is FAILED
     updated_old_payment = await test_db.get(Payment, old_pending_payment.id)
     assert updated_old_payment.status == PaymentStatus.FAILED
-    mock_notification_service.assert_called_once() # Only one notification for the timed out payment
+    mock_notification_service.send_notification.assert_called_once() # Only one notification for the timed out payment
 
     # Verify recent pending payment is still PENDING
     updated_recent_payment = await test_db.get(Payment, recent_pending_payment.id)
