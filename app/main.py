@@ -5,6 +5,8 @@ from fastapi import FastAPI, HTTPException, status
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 import httpx
+import redis.asyncio as redis
+from fastapi_limiter import FastAPILimiter
 
 from app.config import settings
 from app.routers import payments
@@ -14,10 +16,8 @@ from sqlalchemy.orm import sessionmaker
 from app.models.payment import Payment, PaymentStatus
 from datetime import datetime, timedelta
 from app.utils.retry import async_retry
-
-# Configure logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+from app.core.logging import logger # Import structured logger
+from app.services.notification import notification_service # Import new notification service
 
 # Database setup
 engine = create_async_engine(settings.DATABASE_URL, echo=True)
@@ -31,17 +31,18 @@ async def get_db():
 scheduler = AsyncIOScheduler()
 
 @async_retry(max_attempts=3, delay=1, exceptions=(httpx.RequestError, HTTPException))
-async def notify_landlord(payload):
+async def notify_landlord_external(payload):
+    """Sends notification to the external Notification Service."""
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.post(f"{settings.NOTIFICATION_SERVICE_URL}/notify", json=payload, timeout=5)
+            response = await client.post(f"{settings.NOTIFICATION_SERVICE_URL}/notifications/send", json=payload, timeout=5)
             response.raise_for_status()
-            logger.info(f"Notification sent successfully for user {payload.get('user_id')}")
+            logger.info("Notification sent successfully via external service", user_id=payload.get('user_id'), subject=payload.get('subject'))
         except httpx.RequestError as exc:
-            logger.error(f"Notification service request error: {exc}")
+            logger.error("Notification service request error", user_id=payload.get('user_id'), error=str(exc))
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Notification service unavailable")
         except httpx.HTTPStatusError as exc:
-            logger.error(f"Notification service error: {exc.response.status_code} - {exc.response.text}")
+            logger.error("Notification service HTTP error", user_id=payload.get('user_id'), status_code=exc.response.status_code, response_text=exc.response.text)
             raise HTTPException(status_code=exc.response.status_code, detail="Notification service error")
 
 async def timeout_pending_payments():
@@ -60,21 +61,29 @@ async def timeout_pending_payments():
             payment.status = PaymentStatus.FAILED
             payment.updated_at = datetime.now()
             db.add(payment)
-            logger.info(f"Payment {payment.id} timed out and marked as FAILED.")
+            logger.info("Payment timed out and marked as FAILED.", payment_id=payment.id, user_id=payment.user_id)
 
-            # Notify landlord
-            notification_payload = {
+            # Notify landlord using the new notification service
+            # Placeholder for user details, ideally fetched from User Management
+            user_details_for_notification = {
                 "user_id": str(payment.user_id),
-                "email": "landlord@example.com", # Placeholder, ideally fetch from User Management
-                "phone_number": "+251911123456", # Placeholder
-                "preferred_language": "en", # Placeholder
-                "message": f"Your payment for property {payment.property_id} has timed out and failed. Please try again.",
-                "subject": "Payment Failed - Action Required"
+                "email": "landlord@example.com",
+                "phone_number": "+251911123456",
+                "preferred_language": "en",
             }
             try:
-                await notify_landlord(notification_payload)
+                await notification_service.send_notification(
+                    user_id=user_details_for_notification["user_id"],
+                    email=user_details_for_notification["email"],
+                    phone_number=user_details_for_notification["phone_number"],
+                    preferred_language=user_details_for_notification["preferred_language"],
+                    template_name="payment_timed_out",
+                    template_vars={
+                        "property_id": str(payment.property_id)
+                    }
+                )
             except Exception as e:
-                logger.error(f"Failed to send timeout notification for payment {payment.id}: {e}")
+                logger.error("Failed to send timeout notification.", payment_id=payment.id, error=str(e))
 
         await db.commit()
     logger.info("Timeout job for pending payments completed.")
@@ -83,9 +92,11 @@ async def timeout_pending_payments():
 async def lifespan(app: FastAPI):
     # Startup
     logger.info("Payment Processing Microservice starting up...")
-    # No need to create tables here, migrate.sh handles it
-    # async with engine.begin() as conn:
-    #     await conn.run_sync(Base.metadata.create_all)
+
+    # Initialize FastAPI-Limiter
+    redis_connection = redis.from_url(settings.REDIS_URL, encoding="utf8", decode_responses=True)
+    await FastAPILimiter.init(redis_connection)
+    logger.info("FastAPILimiter initialized with Redis.")
 
     scheduler.add_job(
         timeout_pending_payments,
@@ -100,6 +111,8 @@ async def lifespan(app: FastAPI):
     logger.info("Payment Processing Microservice shutting down...")
     scheduler.shutdown()
     logger.info("Scheduler shut down.")
+    await FastAPILimiter.close()
+    logger.info("FastAPILimiter closed.")
 
 app = FastAPI(lifespan=lifespan, title="Payment Processing Microservice", version="1.0.0")
 
