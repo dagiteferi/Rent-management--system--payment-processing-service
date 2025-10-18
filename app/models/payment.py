@@ -18,6 +18,7 @@ class Payment(Base):
     __tablename__ = "payments"
 
     id: uuid.UUID = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    request_id: uuid.UUID = Column(UUID(as_uuid=True), unique=True, nullable=False) # Added for idempotency
     property_id: uuid.UUID = Column(UUID(as_uuid=True), nullable=False)
     user_id: uuid.UUID = Column(UUID(as_uuid=True), nullable=False)
     amount: float = Column(DECIMAL(10, 2), nullable=False, default=100.00)
