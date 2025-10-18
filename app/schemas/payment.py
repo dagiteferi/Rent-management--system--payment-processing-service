@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 from app.models.payment import PaymentStatus
 
 class PaymentBase(BaseModel):
+    request_id: uuid.UUID = Field(default_factory=uuid.uuid4) # Added for idempotency
     property_id: uuid.UUID
     user_id: uuid.UUID
     amount: float = Field(default=100.00, ge=0)
