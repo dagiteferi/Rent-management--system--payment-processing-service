@@ -15,10 +15,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthRespo
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        # Decode JWT locally first to get basic info like user_id if needed, or just pass to User Management
-        # For this project, we'll rely on User Management for full validation and user data retrieval.
+        
         payload = jwt.decode(token, settings.JWT_SECRET, algorithms=["HS256"])
-        # We don't fully trust the payload here, User Management will be the source of truth
+        
         user_id: str = payload.get("sub")
         if user_id is None:
             raise credentials_exception
