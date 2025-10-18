@@ -8,6 +8,7 @@ import json
 from app.models.payment import Payment, PaymentStatus
 from app.core.security import encrypt_data, decrypt_data
 from app.config import settings
+from app.routers.payments import metrics_counters # Import the metrics counter
 
 # Mock settings for testing encryption key and webhook secret
 @pytest.fixture(autouse=True)
@@ -48,6 +49,41 @@ async def test_health_check_chapa_failure(client: AsyncClient, mock_chapa_servic
     assert response.json()['db'] == "ok"
     assert response.json()['chapa_api'] == "error"
     assert "Chapa API error" in response.json()['chapa_api_error']
+
+@pytest.mark.asyncio
+async def test_metrics_endpoint(client: AsyncClient):
+    # Reset counters for a clean test
+    for key in metrics_counters:
+        metrics_counters[key] = 0
+
+    response = await client.get("/api/v1/metrics")
+    assert response.status_code == 200
+    assert response.json() == {
+        "total_payments": 0,
+        "pending_payments": 0,
+        "success_payments": 0,
+        "failed_payments": 0,
+        "webhook_calls": 0,
+        "initiate_calls": 0,
+        "status_calls": 0,
+        "timeout_jobs_run": 0,
+    }
+
+    # Simulate some calls to update metrics
+    metrics_counters["initiate_calls"] += 1
+    metrics_counters["total_payments"] += 1
+    metrics_counters["pending_payments"] += 1
+    metrics_counters["webhook_calls"] += 1
+    metrics_counters["success_payments"] += 1
+    metrics_counters["pending_payments"] -= 1 # From webhook success
+
+    response = await client.get("/api/v1/metrics")
+    assert response.status_code == 200
+    assert response.json()["initiate_calls"] == 1
+    assert response.json()["total_payments"] == 1
+    assert response.json()["pending_payments"] == 0
+    assert response.json()["success_payments"] == 1
+    assert response.json()["webhook_calls"] == 1
 
 @pytest.mark.asyncio
 async def test_initiate_payment_success(
