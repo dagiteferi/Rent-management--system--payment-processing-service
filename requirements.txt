@@ -11,4 +11,5 @@ python-dotenv==1.0.0
 psycopg2-binary==2.9.9 # For local development/testing with SQLAlchemy
 structlog==23.2.0
 fastapi-limiter==0.1.5
-redis==5.0.1
+redis==4.5.1
+pydantic_settings

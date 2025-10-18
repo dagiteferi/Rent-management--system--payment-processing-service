@@ -1,6 +1,8 @@
 import httpx
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2Bearer
+from fastapi.security import OAuth2PasswordBearer
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token") # This tokenUrl is a placeholder, actual auth is via User Management
 from jose import jwt, JWTError
 from app.config import settings
 from app.schemas.payment import UserAuthResponse
