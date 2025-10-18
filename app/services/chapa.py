@@ -1,18 +1,19 @@
 import httpx
-import logging
+import hmac
+import hashlib
 from typing import Dict, Any
 
 from app.config import settings
 from app.schemas.payment import ChapaInitializeRequest, ChapaInitializeResponse, ChapaVerifyResponse
 from app.utils.retry import async_retry
-
-logger = logging.getLogger(__name__)
+from app.core.logging import logger
 
 class ChapaService:
     def __init__(self):
         self.base_url = settings.CHAPA_BASE_URL
         self.api_key = settings.CHAPA_API_KEY
         self.secret_key = settings.CHAPA_SECRET_KEY # Not directly used for API calls, but good to have
+        self.webhook_secret = settings.CHAPA_WEBHOOK_SECRET
         self.headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json"
@@ -25,12 +26,13 @@ class ChapaService:
             try:
                 response = await client.post(url, json=payment_data.model_dump(), headers=self.headers, timeout=10)
                 response.raise_for_status()
+                logger.info("Chapa payment initialization successful", tx_ref=payment_data.tx_ref)
                 return ChapaInitializeResponse(**response.json())
             except httpx.RequestError as exc:
-                logger.error(f"Chapa initialize_payment RequestError: {exc}")
+                logger.error("Chapa initialize_payment RequestError", tx_ref=payment_data.tx_ref, error=str(exc))
                 raise
             except httpx.HTTPStatusError as exc:
-                logger.error(f"Chapa initialize_payment HTTPStatusError: {exc.response.status_code} - {exc.response.text}")
+                logger.error("Chapa initialize_payment HTTPStatusError", tx_ref=payment_data.tx_ref, status_code=exc.response.status_code, response_text=exc.response.text)
                 raise
 
     @async_retry(max_attempts=3, delay=1, exceptions=(httpx.RequestError, httpx.HTTPStatusError))
@@ -40,21 +42,36 @@ class ChapaService:
             try:
                 response = await client.get(url, headers=self.headers, timeout=10)
                 response.raise_for_status()
+                logger.info("Chapa payment verification successful", tx_ref=transaction_reference)
                 return ChapaVerifyResponse(**response.json())
             except httpx.RequestError as exc:
-                logger.error(f"Chapa verify_payment RequestError: {exc}")
+                logger.error("Chapa verify_payment RequestError", tx_ref=transaction_reference, error=str(exc))
                 raise
             except httpx.HTTPStatusError as exc:
-                logger.error(f"Chapa verify_payment HTTPStatusError: {exc.response.status_code} - {exc.response.text}")
+                logger.error("Chapa verify_payment HTTPStatusError", tx_ref=transaction_reference, status_code=exc.response.status_code, response_text=exc.response.text)
                 raise
 
-    # Webhook verification (simplified for sandbox, but in production, verify signature)
-    def verify_webhook_signature(self, payload: Dict[str, Any], signature: str) -> bool:
-        # In a real scenario, you would compute a hash of the payload using your secret key
-        # and compare it with the signature provided in the header.
-        # For Chapa sandbox, this might be a placeholder or rely on IP whitelisting.
-        # For now, we'll return True for simplicity in sandbox, but this MUST be implemented securely.
-        logger.warning("Webhook signature verification is currently a placeholder. Implement actual signature verification in production!")
-        return True
+    def verify_webhook_signature(self, payload_body: bytes, chapa_signature: str) -> bool:
+        """
+        Verifies the HMAC-SHA256 signature of the Chapa webhook payload.
+        The signature is typically sent in an 'x-chapa-signature' header.
+        """
+        if not self.webhook_secret:
+            logger.warning("CHAPA_WEBHOOK_SECRET is not set. Webhook signature verification skipped.")
+            return True # In production, this should raise an error or return False
+
+        # Chapa typically sends the signature as a hex string
+        expected_signature = hmac.new(
+            self.webhook_secret.encode('utf-8'),
+            payload_body,
+            hashlib.sha256
+        ).hexdigest()
+
+        if hmac.compare_digest(expected_signature, chapa_signature):
+            logger.info("Chapa webhook signature verified successfully.")
+            return True
+        else:
+            logger.warning("Chapa webhook signature verification failed.", expected_signature=expected_signature, received_signature=chapa_signature)
+            return False
 
 chapa_service = ChapaService()
