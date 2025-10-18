@@ -9,6 +9,7 @@ This microservice handles payment initiation, verification, and status updates f
 - [Running the Application](#running-the-application)
 - [API Endpoints](#api-endpoints)
 - [Chapa Sandbox Setup](#chapa-sandbox-setup)
+- [Frontend Integration Guidance](#frontend-integration-guidance)
 - [Testing](#testing)
 
 ## Setup
@@ -33,19 +34,21 @@ Create a `.env` file in the root directory based on `.env.example`:
 ```ini
 CHAPA_API_KEY="your_chapa_api_key_here"
 CHAPA_SECRET_KEY="your_chapa_secret_key_here"
+CHAPA_WEBHOOK_SECRET="your_chapa_webhook_secret_key_here" # Used for HMAC-SHA256 webhook verification
 JWT_SECRET="your_jwt_secret_key_here"
 USER_MANAGEMENT_URL="http://user-management:8000/api/v1"
 DATABASE_URL="postgresql+asyncpg://user:password@host:port/database"
 NOTIFICATION_SERVICE_URL="http://notification-service:8000/api/v1"
 PROPERTY_LISTING_SERVICE_URL="http://property-listing-service:8000/api/v1"
 ENCRYPTION_KEY="a_32_byte_secret_key_for_aes_encryption" # Must be 32 bytes for AES-256
+REDIS_URL="redis://localhost:6379/0" # For rate limiting and optional caching
 ```
 
 ## Database Setup
 
-Ensure you have a PostgreSQL database running. Update the `DATABASE_URL` in your `.env` file.
+Ensure you have a PostgreSQL database running and accessible. Update the `DATABASE_URL` in your `.env` file.
 
-Run the migration script to create the `Payments` table:
+Run the migration script to create the `Payments` table and seed initial data:
 
 ```bash
 ./migrate.sh
@@ -64,8 +67,148 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 ## Chapa Sandbox Setup
 
 1.  Sign up for a Chapa.co sandbox account.
-2.  Obtain your `CHAPA_API_KEY` and `CHAPA_SECRET_KEY` from your sandbox dashboard.
-3.  Configure a webhook URL in your Chapa dashboard to point to `YOUR_SERVICE_URL/api/v1/webhook/chapa`.
+2.  Obtain your `CHAPA_API_KEY`, `CHAPA_SECRET_KEY`, and configure a `CHAPA_WEBHOOK_SECRET` for signature verification.
+3.  Configure a webhook URL in your Chapa dashboard to point to `YOUR_SERVICE_PUBLIC_URL/api/v1/webhook/chapa`.
+
+## Frontend Integration Guidance
+
+Here are React.js snippets for integrating with the Payment Processing Microservice:
+
+### 1. Initiating a Payment
+
+```jsx
+// components/InitiatePaymentButton.jsx
+import React, { useState } from 'react';
+import axios from 'axios';
+import { v4 as uuidv4 } from 'uuid'; // For generating request_id
+
+const InitiatePaymentButton = ({ propertyId, userId, amount, jwtToken }) => {
+  const [loading, setLoading] = useState(false);
+  const [paymentLink, setPaymentLink] = useState(null);
+  const [error, setError] = useState(null);
+
+  const handleInitiatePayment = async () => {
+    setLoading(true);
+    setError(null);
+    setPaymentLink(null);
+
+    try {
+      const response = await axios.post(
+        '/api/v1/payments/initiate', // Adjust base URL as needed
+        {
+          request_id: uuidv4(), // Unique ID for idempotency
+          property_id: propertyId,
+          user_id: userId,
+          amount: amount,
+        },
+        {
+          headers: {
+            Authorization: `Bearer ${jwtToken}`,
+            'Content-Type': 'application/json',
+          },
+        }
+      );
+      setPaymentLink(response.data.chapa_tx_ref); // chapa_tx_ref will contain the checkout URL
+    } catch (err) {
+      console.error('Error initiating payment:', err);
+      setError(err.response?.data?.detail || 'Failed to initiate payment');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div>
+      <button onClick={handleInitiatePayment} disabled={loading}>
+        {loading ? 'Initiating...' : 'Pay to Post Listing'}
+      </button>
+      {paymentLink && (
+        <p>
+          Payment initiated! Complete your payment here:
+          <a href={paymentLink} target="_blank" rel="noopener noreferrer">
+            {paymentLink}
+          </a>
+        </p>
+      )}
+      {error && <p style={{ color: 'red' }}>Error: {error}</p>}
+    </div>
+  );
+};
+
+export default InitiatePaymentButton;
+```
+
+### 2. Polling Payment Status
+
+```jsx
+// components/PaymentStatusChecker.jsx
+import React, { useState, useEffect } from 'react';
+import axios from 'axios';
+
+const PaymentStatusChecker = ({ paymentId, jwtToken }) => {
+  const [status, setStatus] = useState('UNKNOWN');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState(null);
+
+  const fetchPaymentStatus = async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const response = await axios.get(
+        `/api/v1/payments/${paymentId}/status`, // Adjust base URL as needed
+        {
+          headers: {
+            Authorization: `Bearer ${jwtToken}`,
+          },
+        }
+      );
+      setStatus(response.data.status);
+      return response.data.status;
+    } catch (err) {
+      console.error('Error fetching payment status:', err);
+      setError(err.response?.data?.detail || 'Failed to fetch status');
+      return 'ERROR';
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!paymentId || !jwtToken) return;
+
+    let intervalId;
+
+    const pollStatus = async () => {
+      const currentStatus = await fetchPaymentStatus();
+      if (currentStatus === 'SUCCESS' || currentStatus === 'FAILED' || currentStatus === 'ERROR') {
+        clearInterval(intervalId);
+      }
+    };
+
+    // Initial fetch
+    pollStatus();
+
+    // Poll every 5 seconds until success or failure
+    intervalId = setInterval(pollStatus, 5000);
+
+    return () => clearInterval(intervalId);
+  }, [paymentId, jwtToken]);
+
+  return (
+    <div>
+      <h3>Payment Status for ID: {paymentId}</h3>
+      <p>Current Status: <strong>{status}</strong></p>
+      {loading && <p>Checking status...</p>}
+      {error && <p style={{ color: 'red' }}>Error: {error}</p>}
+      {(status === 'SUCCESS' || status === 'FAILED') && (
+        <p>Payment process completed.</p>
+      )}
+    </div>
+  );
+};
+
+export default PaymentStatusChecker;
+```
 
 ## Testing
 
