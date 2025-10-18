@@ -4,6 +4,7 @@ CREATE TYPE payment_status AS ENUM ('PENDING', 'SUCCESS', 'FAILED');
 
 CREATE TABLE IF NOT EXISTS payments (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    request_id UUID UNIQUE NOT NULL, -- Added for idempotency
     property_id UUID NOT NULL,
     user_id UUID NOT NULL,
     amount DECIMAL(10, 2) NOT NULL DEFAULT 100.00,
