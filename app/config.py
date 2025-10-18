@@ -6,6 +6,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str
     CHAPA_API_KEY: str
     CHAPA_SECRET_KEY: str
+    CHAPA_WEBHOOK_SECRET: str # Added for webhook signature verification
     JWT_SECRET: str
     USER_MANAGEMENT_URL: str
     NOTIFICATION_SERVICE_URL: str

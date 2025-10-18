@@ -9,7 +9,7 @@ from app.schemas.payment import UserAuthResponse
 from app.utils.retry import async_retry
 from app.core.logging import logger # Import structured logger
 
-oauth2_scheme = OAuth2Bearer(tokenUrl="token") # This tokenUrl is a placeholder, actual auth is via User Management
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token") # This tokenUrl is a placeholder, actual auth is via User Management
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthResponse:
     credentials_exception = HTTPException(
