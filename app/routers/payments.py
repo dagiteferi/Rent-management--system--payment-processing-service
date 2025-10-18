@@ -1,34 +1,65 @@
 import uuid
-import logging
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, status, Request
+from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 import httpx
 
 from app.config import settings
 from app.dependencies.auth import get_current_owner, get_current_user
 from app.models.payment import Payment, PaymentStatus
-from app.schemas.payment import PaymentCreate, PaymentResponse, ChapaInitializeRequest, WebhookEvent, NotificationPayload
+from app.schemas.payment import PaymentCreate, PaymentResponse, ChapaInitializeRequest, WebhookEvent, NotificationPayload, UserAuthResponse
 from app.services.chapa import chapa_service
 from app.core.security import encrypt_data, decrypt_data
 from app.main import get_db # Import get_db from main
 from app.utils.retry import async_retry
+from app.core.logging import logger # Import structured logger
+from app.services.notification import notification_service # Import new notification service
+
+# For rate limiting
+from fastapi_limiter.depends import RateLimiter
+
+# For optional Redis caching
+# import redis.asyncio as redis
+# from app.config import settings
+# redis_client = redis.from_url(settings.REDIS_URL, encoding="utf8", decode_responses=True)
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
-@router.post("/payments/initiate", response_model=PaymentResponse, status_code=status.HTTP_202_ACCEPTED)
+@router.post("/payments/initiate", response_model=PaymentResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(RateLimiter(times=10, seconds=60))])
 async def initiate_payment(
     payment_create: PaymentCreate,
-    current_owner: dict = Depends(get_current_owner),
+    current_owner: UserAuthResponse = Depends(get_current_owner),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Initiate a payment for a property listing. Only Owners can initiate payments.
     Generates a Chapa payment link and stores the payment as PENDING.
+    Includes idempotency check using request_id.
     """
-    logger.info(f"Initiating payment for user {current_owner['user_id']} and property {payment_create.property_id}")
+    logger.info("Initiating payment request", user_id=current_owner.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id)
+
+    # Idempotency check: Check if a payment with this request_id already exists
+    existing_payment = await db.execute(
+        select(Payment).where(Payment.request_id == payment_create.request_id)
+    )
+    existing_payment = existing_payment.scalar_one_or_none()
+
+    if existing_payment:
+        logger.info("Idempotent request: Payment already exists for request_id", request_id=payment_create.request_id, payment_id=existing_payment.id)
+        # For idempotency, return the existing payment status and checkout URL if available
+        # Assuming chapa_tx_ref stores the checkout URL for PENDING payments initially
+        return PaymentResponse(
+            id=existing_payment.id,
+            property_id=existing_payment.property_id,
+            user_id=existing_payment.user_id,
+            amount=existing_payment.amount,
+            status=existing_payment.status,
+            chapa_tx_ref=decrypt_data(existing_payment.chapa_tx_ref) if existing_payment.status == PaymentStatus.PENDING else "********", # Return checkout URL if pending, else mask
+            created_at=existing_payment.created_at,
+            updated_at=existing_payment.updated_at
+        )
 
     # Generate a unique transaction reference for Chapa
     chapa_tx_ref = f"tx-{uuid.uuid4()}"
@@ -37,64 +68,70 @@ async def initiate_payment(
     chapa_init_request = ChapaInitializeRequest(
         amount=str(payment_create.amount),
         currency="ETB",
-        email=current_owner['email'],
+        email=current_owner.email,
         first_name="Owner", # Placeholder, ideally get from User Management
         last_name="User",   # Placeholder
-        phone_number=current_owner['phone_number'],
+        phone_number=current_owner.phone_number,
         tx_ref=chapa_tx_ref,
         callback_url=f"{settings.CHAPA_WEBHOOK_URL}", # This should be the public URL of your service
         return_url="https://your-rent-management-frontend.com/payment-status", # Frontend URL to redirect after payment
+        customization={
+            "title": "Property Listing Payment",
+            "description": f"Payment for property {payment_create.property_id}"
+        },
         meta={
-            "user_id": str(current_owner['user_id']),
-            "property_id": str(payment_create.property_id)
+            "user_id": str(current_owner.user_id),
+            "property_id": str(payment_create.property_id),
+            "request_id": str(payment_create.request_id) # Pass request_id to Chapa meta
         }
     )
 
     try:
         chapa_response = await chapa_service.initialize_payment(chapa_init_request)
         if chapa_response.status != "success":
-            logger.error(f"Chapa payment initialization failed: {chapa_response.message}")
+            logger.error("Chapa payment initialization failed", user_id=current_owner.user_id, property_id=payment_create.property_id, chapa_message=chapa_response.message)
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Payment initialization failed: {chapa_response.message}")
 
-        # Encrypt chapa_tx_ref before storing
+        checkout_url = chapa_response.data['checkout_url']
+
+        # Encrypt chapa_tx_ref (which is the actual transaction reference, not the checkout URL) before storing
         encrypted_chapa_tx_ref = encrypt_data(chapa_tx_ref)
 
         # Store payment in DB
         new_payment = Payment(
+            request_id=payment_create.request_id,
             property_id=payment_create.property_id,
-            user_id=current_owner['user_id'],
+            user_id=current_owner.user_id,
             amount=payment_create.amount,
             status=PaymentStatus.PENDING,
-            chapa_tx_ref=encrypted_chapa_tx_ref
+            chapa_tx_ref=encrypted_chapa_tx_ref # Store the actual Chapa transaction reference
         )
         db.add(new_payment)
         await db.commit()
         await db.refresh(new_payment)
 
-        # Notify landlord about pending payment
-        notification_payload = NotificationPayload(
-            user_id=current_owner['user_id'],
-            email=current_owner['email'],
-            phone_number=current_owner['phone_number'],
-            preferred_language=current_owner['preferred_language'],
-            message=f"Your payment for property {payment_create.property_id} has been initiated. Please complete the payment using the link: {chapa_response.data['checkout_url']}",
-            subject="Payment Initiated - Action Required"
-        )
-        try:
-            await notify_landlord(notification_payload.model_dump())
-        except Exception as e:
-            logger.error(f"Failed to send notification for initiated payment {new_payment.id}: {e}")
+        logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=new_owner.user_id, property_id=new_payment.property_id, checkout_url=checkout_url)
 
-        # For the response, we might want to return the checkout_url directly or a PaymentResponse with a link
-        # For now, let's return the PaymentResponse and log the checkout_url
-        logger.info(f"Payment {new_payment.id} initiated. Checkout URL: {chapa_response.data['checkout_url']}")
+        # Notify landlord about pending payment using the new notification service
+        await notification_service.send_notification(
+            user_id=str(current_owner.user_id),
+            email=current_owner.email,
+            phone_number=current_owner.phone_number,
+            preferred_language=current_owner.preferred_language,
+            template_name="payment_initiated",
+            template_vars={
+                "property_id": str(payment_create.property_id),
+                "payment_link": checkout_url
+            }
+        )
+
         return PaymentResponse(
             id=new_payment.id,
             property_id=new_payment.property_id,
             user_id=new_payment.user_id,
             amount=new_payment.amount,
             status=new_payment.status,
-            chapa_tx_ref=chapa_response.data['checkout_url'], # Returning checkout URL here for simplicity
+            chapa_tx_ref=checkout_url, # Return checkout URL here for the client
             created_at=new_payment.created_at,
             updated_at=new_payment.updated_at
         )
@@ -102,32 +139,39 @@ async def initiate_payment(
     except HTTPException:
         raise # Re-raise HTTPExceptions
     except Exception as e:
-        logger.exception("Error initiating payment")
+        logger.exception("Error initiating payment", user_id=current_owner.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id)
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {e}")
 
 @router.get("/payments/{payment_id}/status", response_model=PaymentResponse)
 async def get_payment_status(
     payment_id: uuid.UUID,
-    current_user: dict = Depends(get_current_user),
+    current_user: UserAuthResponse = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """
     Retrieve the status of a specific payment.
     """
-    logger.info(f"Fetching status for payment {payment_id} by user {current_user['user_id']}")
+    logger.info("Fetching status for payment", payment_id=payment_id, user_id=current_user.user_id)
+
+    # Optional: Redis caching for payment status
+    # cache_key = f"payment_status:{payment_id}"
+    # cached_status = await redis_client.get(cache_key)
+    # if cached_status:
+    #     logger.info("Payment status retrieved from cache", payment_id=payment_id)
+    #     return PaymentResponse.model_validate_json(cached_status)
+
     payment = await db.get(Payment, payment_id)
 
     if not payment:
+        logger.warning("Payment not found", payment_id=payment_id, user_id=current_user.user_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found")
 
     # Only the user who made the payment or an admin should view the status
-    if payment.user_id != current_user['user_id'] and current_user['role'] != "Admin": # Assuming an 'Admin' role exists
+    if payment.user_id != current_user.user_id and current_user.role != "Admin": # Assuming an 'Admin' role exists
+        logger.warning("Unauthorized access to payment status", payment_id=payment_id, user_id=current_user.user_id, requested_by_role=current_user.role)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not authorized to view this payment status")
 
-    # Decrypt chapa_tx_ref for internal use if needed, but for response, it's fine as is
-    # decrypted_chapa_tx_ref = decrypt_data(payment.chapa_tx_ref)
-
-    return PaymentResponse(
+    response_data = PaymentResponse(
         id=payment.id,
         property_id=payment.property_id,
         user_id=payment.user_id,
@@ -138,61 +182,93 @@ async def get_payment_status(
         updated_at=payment.updated_at
     )
 
+    # Optional: Cache payment status
+    # await redis_client.set(cache_key, response_data.model_dump_json(), ex=60) # Cache for 60 seconds
+    # logger.info("Payment status cached", payment_id=payment_id)
+
+    return response_data
+
 @router.post("/webhook/chapa", status_code=status.HTTP_200_OK)
-async def chapa_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+async def chapa_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    x_chapa_signature: str = Header(None) # Chapa webhook signature header
+):
     """
     Handles Chapa webhooks for payment status updates.
+    Verifies webhook signature for authenticity.
     """
-    logger.info("Received Chapa webhook")
-    payload = await request.json()
-    # In a real scenario, you would verify the webhook signature using settings.CHAPA_SECRET_KEY
-    # For sandbox, we'll proceed without strict signature verification for now, but it's CRITICAL for production.
-    # if not chapa_service.verify_webhook_signature(payload, request.headers.get("chapa-signature")):
-    #     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature")
+    payload_body = await request.body()
+    logger.info("Received Chapa webhook", payload_size=len(payload_body))
+
+    # 1. Verify webhook signature
+    if not x_chapa_signature:
+        logger.error("Webhook received without X-Chapa-Signature header.")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="X-Chapa-Signature header missing")
+
+    if not chapa_service.verify_webhook_signature(payload_body, x_chapa_signature):
+        logger.error("Invalid Chapa webhook signature.", received_signature=x_chapa_signature)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature")
+
+    try:
+        payload = await request.json()
+    except Exception as e:
+        logger.error("Could not parse webhook payload as JSON", error=str(e), payload_body=payload_body.decode())
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
 
     event_data = payload.get("data", {})
     chapa_tx_ref = event_data.get("tx_ref")
     transaction_status = event_data.get("status")
+    meta_data = event_data.get("meta", {})
+    webhook_user_id = meta_data.get("user_id")
+    webhook_property_id = meta_data.get("property_id")
 
     if not chapa_tx_ref or not transaction_status:
-        logger.error(f"Invalid webhook payload: missing tx_ref or status. Payload: {payload}")
+        logger.error("Invalid webhook payload: missing tx_ref or status.", payload=payload)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook payload")
 
-    logger.info(f"Processing Chapa webhook for tx_ref: {chapa_tx_ref}, status: {transaction_status}")
+    logger.info("Processing Chapa webhook", chapa_tx_ref=chapa_tx_ref, transaction_status=transaction_status, user_id=webhook_user_id, property_id=webhook_property_id)
 
     # Decrypt all stored chapa_tx_ref to find a match
     # This is inefficient for large number of payments. A better approach would be to store a hash of tx_ref
     # or use a non-encrypted tx_ref for lookup and encrypt other sensitive data.
     # For this project, given the constraints, we'll iterate and decrypt.
-    payments_to_update = []
-    all_payments = await db.execute(Payment.__table__.select().where(Payment.status == PaymentStatus.PENDING))
-    all_payments = all_payments.scalars().all()
-
     found_payment = None
-    for payment in all_payments:
+    # Only query for PENDING payments to reduce search space
+    pending_payments_stmt = select(Payment).where(Payment.status == PaymentStatus.PENDING)
+    pending_payments_result = await db.execute(pending_payments_stmt)
+    all_pending_payments = pending_payments_result.scalars().all()
+
+    for payment in all_pending_payments:
         try:
             decrypted_ref = decrypt_data(payment.chapa_tx_ref)
             if decrypted_ref == chapa_tx_ref:
                 found_payment = payment
                 break
         except Exception as e:
-            logger.error(f"Error decrypting chapa_tx_ref for payment {payment.id}: {e}")
+            logger.error("Error decrypting chapa_tx_ref for payment", payment_id=payment.id, error=str(e))
             continue
 
     if not found_payment:
-        logger.warning(f"No PENDING payment found for Chapa tx_ref: {chapa_tx_ref}")
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Payment not found or not in PENDING state")
+        logger.warning("No PENDING payment found for Chapa tx_ref", chapa_tx_ref=chapa_tx_ref)
+        # It's possible the payment was already processed or timed out, so return 200 to Chapa
+        return {"message": "Payment not found or not in PENDING state, no action taken"}
+
+    # Prevent reprocessing if status is already SUCCESS or FAILED
+    if found_payment.status != PaymentStatus.PENDING:
+        logger.info("Payment already processed, skipping update", payment_id=found_payment.id, current_status=found_payment.status)
+        return {"message": "Payment already processed, no action taken"}
 
     # Verify payment with Chapa API to confirm status (double-check)
     try:
         verification_response = await chapa_service.verify_payment(chapa_tx_ref)
         if verification_response.status != "success" or verification_response.data.get("status") != "success":
-            logger.warning(f"Chapa verification failed for tx_ref {chapa_tx_ref}. API status: {verification_response.status}, Data status: {verification_response.data.get('status')}")
+            logger.warning("Chapa API verification failed", chapa_tx_ref=chapa_tx_ref, api_status=verification_response.status, data_status=verification_response.data.get("status"))
             new_status = PaymentStatus.FAILED
         else:
             new_status = PaymentStatus.SUCCESS
     except Exception as e:
-        logger.error(f"Error verifying payment {chapa_tx_ref} with Chapa API: {e}")
+        logger.error("Error verifying payment with Chapa API", chapa_tx_ref=chapa_tx_ref, error=str(e))
         new_status = PaymentStatus.FAILED # Default to failed if verification fails
 
     # Update payment status in DB
@@ -201,35 +277,33 @@ async def chapa_webhook(request: Request, db: AsyncSession = Depends(get_db)):
     db.add(found_payment)
     await db.commit()
     await db.refresh(found_payment)
-    logger.info(f"Payment {found_payment.id} status updated to {new_status}")
+    logger.info("Payment status updated", payment_id=found_payment.id, old_status=PaymentStatus.PENDING, new_status=new_status)
+
+    # Optional: Invalidate cache for this payment
+    # await redis_client.delete(f"payment_status:{found_payment.id}")
 
     # Trigger Property Listing service for approval if successful
     if new_status == PaymentStatus.SUCCESS:
         try:
             await approve_property_listing(found_payment.property_id)
-            logger.info(f"Property {found_payment.property_id} approved via Property Listing Service.")
+            logger.info("Property approved via Property Listing Service.", property_id=found_payment.property_id, payment_id=found_payment.id)
         except Exception as e:
-            logger.error(f"Failed to approve property {found_payment.property_id} via Property Listing Service: {e}")
+            logger.error("Failed to approve property via Property Listing Service", property_id=found_payment.property_id, payment_id=found_payment.id, error=str(e))
 
-    # Notify landlord/admin
-    notification_message = f"Your payment for property {found_payment.property_id} is now {new_status}."
-    notification_subject = f"Payment {new_status}"
-
-    # Fetch user details from User Management for notification
+    # Notify landlord/admin using the new notification service
     user_details = await get_user_details_for_notification(found_payment.user_id)
 
-    notification_payload = NotificationPayload(
-        user_id=found_payment.user_id,
+    template_name = "payment_success" if new_status == PaymentStatus.SUCCESS else "payment_failed"
+    await notification_service.send_notification(
+        user_id=str(found_payment.user_id),
         email=user_details.email if user_details else "admin@example.com", # Fallback
         phone_number=user_details.phone_number if user_details else "+251900000000", # Fallback
         preferred_language=user_details.preferred_language if user_details else "en", # Fallback
-        message=notification_message,
-        subject=notification_subject
+        template_name=template_name,
+        template_vars={
+            "property_id": str(found_payment.property_id)
+        }
     )
-    try:
-        await notify_landlord(notification_payload.model_dump())
-    except Exception as e:
-        logger.error(f"Failed to send notification for payment {found_payment.id} status update: {e}")
 
     return {"message": "Webhook processed successfully"}
 
@@ -242,44 +316,34 @@ async def approve_property_listing(property_id: uuid.UUID):
                 timeout=5
             )
             response.raise_for_status()
+            logger.info("Property listing approval request sent", property_id=property_id)
             return response.json()
         except httpx.RequestError as exc:
-            logger.error(f"Property Listing service request error for property {property_id}: {exc}")
+            logger.error("Property Listing service request error", property_id=property_id, error=str(exc))
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Property Listing service unavailable")
         except httpx.HTTPStatusError as exc:
-            logger.error(f"Property Listing service error for property {property_id}: {exc.response.status_code} - {exc.response.text}")
+            logger.error("Property Listing service error", property_id=property_id, status_code=exc.response.status_code, response_text=exc.response.text)
             raise HTTPException(status_code=exc.response.status_code, detail="Property Listing service error")
 
 @async_retry(max_attempts=3, delay=1, exceptions=(httpx.RequestError, HTTPException))
-async def get_user_details_for_notification(user_id: uuid.UUID):
+async def get_user_details_for_notification(user_id: uuid.UUID) -> NotificationPayload | None:
     """
     Fetches user details from User Management service for notification purposes.
     This assumes an endpoint in User Management to get user details by ID.
     """
     async with httpx.AsyncClient() as client:
         try:
-            # This endpoint might not exist in User Management, assuming it does for now.
-            # If not, we'd need to adjust or get user details during initial auth.
             response = await client.get(
                 f"{settings.USER_MANAGEMENT_URL}/users/{user_id}",
                 timeout=5
             )
             response.raise_for_status()
-            return NotificationPayload(**response.json()) # Reusing NotificationPayload schema for user details
+            logger.info("User details fetched for notification", user_id=user_id)
+            # Assuming User Management returns a structure compatible with NotificationPayload
+            return NotificationPayload(**response.json())
         except httpx.RequestError as exc:
-            logger.error(f"User Management service request error for user {user_id}: {exc}")
+            logger.error("User Management service request error for notification", user_id=user_id, error=str(exc))
             return None # Return None if service is unavailable
         except httpx.HTTPStatusError as exc:
-            logger.warning(f"User Management service error fetching user {user_id}: {exc.response.status_code} - {exc.response.text}")
+            logger.warning("User Management service error fetching user for notification", user_id=user_id, status_code=exc.response.status_code, response_text=exc.response.text)
             return None # Return None if user not found or other error
-
-# The timeout endpoint is handled by APScheduler in app.main.py
-# @router.post("/payments/timeout")
-# async def trigger_timeout_job():
-#     """
-#     Manually trigger the pending payments timeout job.
-#     This is primarily for testing or manual intervention.
-#     In production, it runs automatically via APScheduler.
-#     """
-#     await timeout_pending_payments()
-#     return {"message": "Pending payments timeout job triggered successfully"}
