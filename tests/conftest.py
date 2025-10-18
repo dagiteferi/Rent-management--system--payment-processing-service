@@ -3,7 +3,8 @@ import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker
-from app.main import app, get_db
+from app.main import app
+from app.dependencies.database import get_db # Import get_db from new database dependency
 from app.models.payment import Base, Payment, PaymentStatus
 from app.config import settings
 from unittest.mock import AsyncMock, patch

@@ -10,22 +10,12 @@ from fastapi_limiter import FastAPILimiter
 
 from app.config import settings
 from app.routers import payments
-from app.models.payment import Base
-from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-from sqlalchemy.orm import sessionmaker
 from app.models.payment import Payment, PaymentStatus
 from datetime import datetime, timedelta
 from app.utils.retry import async_retry
 from app.core.logging import logger # Import structured logger
 from app.services.notification import notification_service # Import new notification service
-
-# Database setup
-engine = create_async_engine(settings.DATABASE_URL, echo=True)
-AsyncSessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine, class_=AsyncSession)
-
-async def get_db():
-    async with AsyncSessionLocal() as session:
-        yield session
+from app.dependencies.database import get_db, AsyncSessionLocal # Import get_db and AsyncSessionLocal from new database dependency
 
 # Scheduler setup
 scheduler = AsyncIOScheduler()

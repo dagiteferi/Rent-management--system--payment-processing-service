@@ -13,7 +13,7 @@ from app.models.payment import Payment, PaymentStatus
 from app.schemas.payment import PaymentCreate, PaymentResponse, ChapaInitializeRequest, WebhookEvent, NotificationPayload, UserAuthResponse
 from app.services.chapa import chapa_service
 from app.core.security import encrypt_data, decrypt_data
-from app.main import get_db # Import get_db from main
+from app.dependencies.database import get_db # Import get_db from new database dependency
 from app.utils.retry import async_retry
 from app.core.logging import logger # Import structured logger
 from app.services.notification import notification_service # Import new notification service
