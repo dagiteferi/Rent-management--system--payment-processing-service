@@ -32,7 +32,7 @@ class NotificationService:
             "en": {
                 "payment_initiated": {
                     "subject": "Payment Initiated - Action Required",
-                    "message": "Dear Landlord, your payment for property {property_id} has been initiated. Please complete the payment using the link: {payment_link}"
+                    "message": "Dear Landlord, your payment for property {property_id} has been initiated. Please complete the payment of 100 ETB via CBE Birr or HelloCash using the link: {payment_link}"
                 },
                 "payment_success": {
                     "subject": "Payment Successful!",
@@ -45,12 +45,16 @@ class NotificationService:
                 "payment_timed_out": {
                     "subject": "Payment Timed Out - Action Required",
                     "message": "Dear Landlord, your pending payment for property {property_id} has timed out and failed. Please try again."
+                },
+                "health_alert": {
+                    "subject": "Service Health Status",
+                    "message": "Payment Processing Microservice is currently {status}. Details: {details}"
                 }
             },
             "am": {
                 "payment_initiated": {
                     "subject": "ክፍያ ተጀምሯል - እርምጃ ያስፈልጋል",
-                    "message": "ውድ የቤት ባለቤት፣ ለንብረትዎ {property_id} ክፍያ ተጀምሯል። እባክዎ ክፍያውን በዚህ ሊንክ ያጠናቅቁ፡ {payment_link}"
+                    "message": "ውድ የቤት ባለቤት፣ ለንብረትዎ {property_id} ክፍያ ተጀምሯል። እባክዎ 100 ብር በ CBE Birr ወይም HelloCash በዚህ ሊንክ ያጠናቅቁ፡ {payment_link}"
                 },
                 "payment_success": {
                     "subject": "ክፍያ ተሳክቷል!",
@@ -63,12 +67,16 @@ class NotificationService:
                 "payment_timed_out": {
                     "subject": "ክፍያ ጊዜው አልፏል - እርምጃ ያስፈልጋል",
                     "message": "ውድ የቤት ባለቤት፣ ለንብረትዎ {property_id} በመጠባበቅ ላይ የነበረው ክፍያ ጊዜው አልፏል እና አልተሳካም። እባክዎ እንደገና ይሞክሩ።"
+                },
+                "health_alert": {
+                    "subject": "የአገልግሎት ጤና ሁኔታ",
+                    "message": "የክፍያ ማቀናበሪያ ማይክሮ አገልግሎት በአሁኑ ጊዜ {status} ነው። ዝርዝሮች፡ {details}"
                 }
             },
             "om": {
                 "payment_initiated": {
                     "subject": "Kaffaltiin Jalqabameera - Tarkaanfii Barbaachisaadha",
-                    "message": "Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {property_id} jalqabameera. Maaloo kaffaltii kana linkii kanaan xumuraa: {payment_link}"
+                    "message": "Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {property_id} jalqabameera. Maaloo kaffaltii 100 ETB CBE Birr ykn HelloCashn linkii kanaan xumuraa: {payment_link}"
                 },
                 "payment_success": {
                     "subject": "Kaffaltiin Milkaa'eera!",
@@ -81,6 +89,10 @@ class NotificationService:
                 "payment_timed_out": {
                     "subject": "Kaffaltiin Yeroo Isaa Darbe - Tarkaanfii Barbaachisaadha",
                     "message": "Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {property_id} yeroo isaa darbeera. Maaloo deebisanii yaalaa."
+                },
+                "health_alert": {
+                    "subject": "Haala Fayyaa Tajaajilaa",
+                    "message": "Tajaajilli Xiqqaa Qindeessaa Kaffaltii yeroo ammaa {status} dha. Bal'ina: {details}"
                 }
             }
         }
