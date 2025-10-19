@@ -1,35 +1,39 @@
 #!/bin/bash
-
 set -e
 
-# Load environment variables from .env file
+# Load environment variables safely
 if [ -f .env ]; then
-    export $(cat .env | grep -v '#' | awk '/=/ {print $1}')
+    set -a
+    source .env
+    set +a
 fi
 
-DB_URL=${DATABASE_URL}
-
-if [ -z "$DB_URL" ]; then
+if [ -z "$DATABASE_URL" ]; then
     echo "Error: DATABASE_URL is not set in .env file."
     exit 1
 fi
 
-# Extract connection details for psql
-DB_HOST=$(echo $DB_URL | sed -e 's/.*@\([^:]*\):.*/\1/')
-DB_PORT=$(echo $DB_URL | sed -e 's/.*:\([0-9]*\)\/.*$/\1/')
-DB_NAME=$(echo $DB_URL | sed -e 's/.*\/\([^?]*\).*/\1/')
-DB_USER=$(echo $DB_URL | sed -e 's/.*\/\/\([^:]*\):.*/\1/')
-DB_PASSWORD=$(echo $DB_URL | sed -e 's/.*:\([^@]*\)@.*/\1/')
+# Parse DATABASE_URL using regex
+DB_URL_REGEX="postgresql\+asyncpg://([^:]+):([^@]+)@([^:]+):([0-9]+)/(.+)"
+if [[ $DATABASE_URL =~ $DB_URL_REGEX ]]; then
+    DB_USER="${BASH_REMATCH[1]}"
+    DB_PASSWORD="${BASH_REMATCH[2]}"
+    DB_HOST="${BASH_REMATCH[3]}"
+    DB_PORT="${BASH_REMATCH[4]}"
+    DB_NAME="${BASH_REMATCH[5]}"
+else
+    echo "Error: DATABASE_URL format is invalid."
+    exit 1
+fi
 
-# Use PGPASSWORD for non-interactive password input
 export PGPASSWORD=$DB_PASSWORD
 
 echo "Applying schema.sql..."
-psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f sql/schema.sql
+psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f sql/schema.sql
 
-echo "Applying seed.sql (if exists)..."
 if [ -f sql/seed.sql ]; then
-    psql -h $DB_HOST -p $DB_PORT -U $DB_USER -d $DB_NAME -f sql/seed.sql
+    echo "Applying seed.sql..."
+    psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" -f sql/seed.sql
 else
     echo "sql/seed.sql not found, skipping."
 fi
