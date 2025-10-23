@@ -9,12 +9,12 @@ import redis.asyncio as redis
 from fastapi_limiter import FastAPILimiter
 
 from app.config import settings
-from app.routers import payments
+from app.routers import payments, auth
 from app.models.payment import Payment, PaymentStatus
 from datetime import datetime, timedelta
 from app.utils.retry import async_retry
-from app.core.logging import logger # Import structured logger
-from app.services.notification import notification_service # Import new notification service
+from app.core.logging import logger 
+from app.services.notification import notification_service 
 from app.dependencies.database import get_db, AsyncSessionLocal # Import get_db and AsyncSessionLocal from new database dependency
 
 # Scheduler setup
@@ -96,4 +96,5 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan, title="Payment Processing Microservice", version="1.0.0")
 
-app.include_router(payments.router, prefix="/api/v1")
+app.include_router(auth.router, tags=["Authentication"])
+app.include_router(payments.router, prefix="/api/v1", tags=["Payments"])
