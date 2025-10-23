@@ -19,7 +19,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
             # The User Management service expects the credentials in a specific format.
             # Typically, this would be form data, similar to what this endpoint receives.
             response = await client.post(
-                f"{settings.USER_MANAGEMENT_URL.rstrip('/')}/api/v1/auth/login",
+                f"{settings.USER_MANAGEMENT_URL.rstrip('/')}/auth/login",
                 data={"username": form_data.username, "password": form_data.password},
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
                 timeout=10
