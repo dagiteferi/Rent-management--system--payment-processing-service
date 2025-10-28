@@ -1,6 +1,5 @@
 import logging
 from typing import Dict
-
 from app.config import settings
 from app.schemas.payment import NotificationPayload
 from app.utils.retry import async_retry
@@ -16,7 +15,7 @@ class NotificationService:
         """Sends notification to the external Notification Service."""
         try:
             async with httpx.AsyncClient() as client:
-                response = await client.post(f"{self.base_url}/notifications/send", json=payload.model_dump(), timeout=5)
+                response = await client.post(f"{self.base_url}/notifications/send", json=payload.model_dump(mode='json'), timeout=5)
                 response.raise_for_status()
                 logger.info("Notification sent successfully via external service", user_id=payload.user_id, subject=payload.subject)
                 return True

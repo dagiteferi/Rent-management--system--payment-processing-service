@@ -5,7 +5,6 @@ import redis.asyncio as redis
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
-
 from app.config import settings
 from app.schemas.payment import UserAuthResponse
 from app.utils.retry import async_retry
@@ -13,8 +12,7 @@ from app.core.logging import logger
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
-# Initialize Redis client for caching
-# This connection is now managed here for auth caching purposes.
+
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthResponse:
@@ -61,7 +59,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthRespo
     async def verify_with_user_management(jwt_token: str):
         async with httpx.AsyncClient() as client:
             try:
-                response = await client.post(
+                response = await client.get(
                     f"{settings.USER_MANAGEMENT_URL.rstrip('/')}/auth/verify",
                     headers={"Authorization": f"Bearer {jwt_token}"},
                     timeout=5
@@ -106,7 +104,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthRespo
 
 
 async def get_current_owner(current_user: UserAuthResponse = Depends(get_current_user)) -> UserAuthResponse:
-    if current_user.role != "Owner":
+    if current_user.role.lower() != "owner":
         logger.warning("Attempt to perform owner action by non-owner.", user_id=current_user.user_id, role=current_user.role)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owners can perform this action")
     return current_user

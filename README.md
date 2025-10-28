@@ -43,6 +43,7 @@ NOTIFICATION_SERVICE_URL="http://notification-service:8000/api/v1"
 PROPERTY_LISTING_SERVICE_URL="http://property-listing-service:8000/api/v1"
 ENCRYPTION_KEY="a_32_byte_secret_key_for_aes_encryption" # Must be 32 bytes for AES-256
 REDIS_URL="redis://localhost:6379/0" # For rate limiting and optional caching
+BASE_URL="http://localhost:8000" # The public base URL of this service
 ```
 
 ## Database Setup

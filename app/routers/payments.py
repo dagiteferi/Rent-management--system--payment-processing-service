@@ -13,7 +13,7 @@ from app.models.payment import Payment, PaymentStatus
 from app.schemas.payment import PaymentCreate, PaymentResponse, ChapaInitializeRequest, WebhookEvent, NotificationPayload, UserAuthResponse
 from app.services.chapa import chapa_service
 from app.core.security import encrypt_data, decrypt_data
-from app.dependencies.database import get_db # Import get_db from new database dependency
+from app.dependencies.database import get_db, AsyncSessionLocal # Import get_db from new database dependency
 from app.utils.retry import async_retry
 from app.core.logging import logger # Import structured logger
 from app.services.notification import notification_service # Import new notification service
@@ -30,6 +30,49 @@ router = APIRouter()
 
 # In-memory metrics counters (for demo purposes, not persistent)
 metrics_counters = defaultdict(int)
+
+async def timeout_pending_payments():
+    metrics_counters["timeout_jobs_run"] += 1
+    logger.info("Running timeout job for pending payments...", service="payment")
+    async with AsyncSessionLocal() as db:
+        seven_days_ago = datetime.now() - timedelta(days=settings.PAYMENT_TIMEOUT_DAYS)
+        result = await db.execute(
+            select(Payment).where(
+                Payment.status == PaymentStatus.PENDING,
+                Payment.created_at < seven_days_ago
+            )
+        )
+        pending_payments = result.scalars().all()
+
+        for payment in pending_payments:
+            payment.status = PaymentStatus.FAILED
+            payment.updated_at = datetime.now()
+            db.add(payment)
+            logger.info("Payment timed out and marked as FAILED.", payment_id=payment.id, user_id=payment.user_id, service="payment")
+
+            # Update metrics
+            metrics_counters["pending_payments"] -= 1
+            metrics_counters["failed_payments"] += 1
+
+            # Fetch user details for notification
+            user_details = await get_user_details_for_notification(payment.user_id)
+            if user_details:
+                try:
+                    await notification_service.send_notification(
+                        user_id=user_details.user_id,
+                        email=user_details.email,
+                        phone_number=user_details.phone_number,
+                        preferred_language=user_details.preferred_language,
+                        template_name="payment_timed_out",
+                        template_vars={"property_id": str(payment.property_id)}
+                    )
+                except Exception as e:
+                    logger.error("Failed to send timeout notification.", payment_id=payment.id, error=str(e), service="payment")
+            else:
+                logger.warning("Could not fetch user details for timeout notification.", user_id=payment.user_id, payment_id=payment.id, service="payment")
+
+        await db.commit()
+    logger.info("Timeout job for pending payments completed.", service="payment")
 
 @router.get("/health", summary="Health Check")
 async def health_check(db: AsyncSession = Depends(get_db)):
@@ -51,10 +94,8 @@ async def health_check(db: AsyncSession = Depends(get_db)):
 
     # Check Chapa API Availability (e.g., by trying to get banks)
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(f"{settings.CHAPA_BASE_URL}/banks", timeout=3)
-            response.raise_for_status()
-            health_status["chapa_api"] = "ok"
+        await chapa_service.get_banks()
+        health_status["chapa_api"] = "ok"
     except Exception as e:
         logger.error("Health check failed: Chapa API error", error=str(e), service="payment")
         health_status["chapa_api"] = "error"
@@ -92,14 +133,18 @@ async def initiate_payment(
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Initiate a payment for a property listing. Only Owners can initiate payments.
-    Generates a Chapa payment link and stores the payment as PENDING.
-    Includes idempotency check using request_id.
+    Initiates a payment for a property listing. Only accessible by users with the 'Owner' role.
+    This endpoint is idempotent; sending the same `request_id` multiple times will not create duplicate payments.
+
+    - **Idempotency**: Uses `request_id` to prevent duplicate payment initializations.
+    - **Chapa Integration**: Generates a unique transaction reference and calls the Chapa API to get a checkout URL.
+    - **Database**: Creates a new payment record with a 'PENDING' status.
+    - **Notifications**: Sends a notification to the user after successful initialization.
     """
     metrics_counters["initiate_calls"] += 1
     logger.info("Initiating payment request", user_id=current_owner.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, service="payment")
 
-    # Idempotency check: Check if a payment with this request_id already exists
+    # Idempotency check: Prevent duplicate payments for the same request.
     existing_payment = await db.execute(
         select(Payment).where(Payment.request_id == payment_create.request_id)
     )
@@ -107,44 +152,46 @@ async def initiate_payment(
 
     if existing_payment:
         logger.info("Idempotent request: Payment already exists for request_id", request_id=payment_create.request_id, payment_id=existing_payment.id, service="payment")
-        # For idempotency, return the existing payment status and checkout URL if available
-        # Assuming chapa_tx_ref stores the checkout URL for PENDING payments initially
+        # For idempotency, it's good practice to return the status of the existing resource.
         return PaymentResponse(
             id=existing_payment.id,
             property_id=existing_payment.property_id,
             user_id=existing_payment.user_id,
             amount=existing_payment.amount,
             status=existing_payment.status,
-            chapa_tx_ref=decrypt_data(existing_payment.chapa_tx_ref) if existing_payment.status == PaymentStatus.PENDING else "********", # Return checkout URL if pending, else mask
+            # The checkout URL is not stored; decrypt the original tx_ref if needed, but masking is safer.
+            chapa_tx_ref="********", 
             created_at=existing_payment.created_at,
             updated_at=existing_payment.updated_at
         )
 
-    # Generate a unique transaction reference for Chapa
+    # Generate a unique transaction reference for this payment attempt.
     chapa_tx_ref = f"tx-{uuid.uuid4()}"
 
-    # Prepare Chapa initialization request
+    # Prepare the request for the Chapa API.
+    # Note: Chapa's sandbox may require a non-test domain for emails (e.g., not 'example.com').
     chapa_init_request = ChapaInitializeRequest(
         amount=str(payment_create.amount),
         currency="ETB",
-        email=current_owner.email,
+        email=current_owner.email, # Use the authenticated user's email.
         first_name="Owner", # Placeholder, ideally get from User Management
         last_name="User",   # Placeholder
         phone_number=current_owner.phone_number,
         tx_ref=chapa_tx_ref,
-        callback_url=f"{settings.CHAPA_WEBHOOK_URL}", # This should be the public URL of your service
-        return_url="https://your-rent-management-frontend.com/payment-status", # Frontend URL to redirect after payment
+        callback_url=f"{settings.BASE_URL}{settings.CHAPA_WEBHOOK_URL}",
+        return_url="https://your-rent-management-frontend.com/payment-status", # Placeholder for frontend return URL
         customization={
-            "title": "Property Listing Payment",
-            "description": f"Payment for property {payment_create.property_id}"
+            "title": "Listing Fee",
+            "description": f"Payment for {payment_create.property_id}"
         },
         meta={
             "user_id": str(current_owner.user_id),
             "property_id": str(payment_create.property_id),
-            "request_id": str(payment_create.request_id) # Pass request_id to Chapa meta
+            "request_id": str(payment_create.request_id)
         }
     )
 
+    logger.info("Preparing to call Chapa service")
     try:
         chapa_response = await chapa_service.initialize_payment(chapa_init_request)
         if chapa_response.status != "success":

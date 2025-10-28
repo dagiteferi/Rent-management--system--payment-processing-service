@@ -1,13 +1,12 @@
 import uuid
 from datetime import datetime
 from typing import Optional
-from enum import Enum as PyEnum # Import Python's Enum
-
+from enum import Enum as PyEnum 
 from sqlalchemy import Column, String, DateTime, DECIMAL
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
-from sqlalchemy import Enum as SQLAlchemyEnum # Import SQLAlchemy's Enum and rename it
+from sqlalchemy import Enum as SQLAlchemyEnum 
 
 Base = declarative_base()
 
@@ -24,7 +23,7 @@ class Payment(Base):
     property_id: uuid.UUID = Column(UUID(as_uuid=True), nullable=False)
     user_id: uuid.UUID = Column(UUID(as_uuid=True), nullable=False)
     amount: float = Column(DECIMAL(10, 2), nullable=False, default=100.00)
-    status: PaymentStatus = Column(SQLAlchemyEnum(PaymentStatus), nullable=False, default=PaymentStatus.PENDING)
+    status: PaymentStatus = Column(SQLAlchemyEnum(PaymentStatus, name="payment_status"), nullable=False, default=PaymentStatus.PENDING)
     chapa_tx_ref: str = Column(String, nullable=False)
     created_at: datetime = Column(DateTime(timezone=True), server_default=func.now())
     updated_at: datetime = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
