@@ -62,7 +62,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthRespo
                 response = await client.get(
                     f"{settings.USER_MANAGEMENT_URL.rstrip('/')}/auth/verify",
                     headers={"Authorization": f"Bearer {jwt_token}"},
-                    timeout=5
+                    timeout=30
                 )
                 response.raise_for_status()
                 return response.json()

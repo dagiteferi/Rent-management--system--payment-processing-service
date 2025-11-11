@@ -22,7 +22,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
                 f"{settings.USER_MANAGEMENT_URL.rstrip('/')}/auth/login",
                 data={"username": form_data.username, "password": form_data.password},
                 headers={"Content-Type": "application/x-www-form-urlencoded"},
-                timeout=10
+                timeout=30
             )
 
             # Check if the request to the User Management service was successful
