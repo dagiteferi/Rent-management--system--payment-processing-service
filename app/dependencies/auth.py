@@ -7,7 +7,8 @@ from jose import jwt, JWTError
 from app.config import settings
 from app.schemas.payment import UserAuthResponse
 from app.utils.retry import async_retry
-from app.core.security import logger, decrypt_data # Import decrypt_data
+from app.core.logging import logger # Correct import for logger
+from app.core.security import decrypt_data # Import decrypt_data
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
