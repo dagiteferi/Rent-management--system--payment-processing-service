@@ -17,6 +17,7 @@ from app.dependencies.database import get_db, AsyncSessionLocal # Import get_db 
 from app.utils.retry import async_retry
 from app.core.logging import logger # Import structured logger
 from app.services.notification import notification_service # Import new notification service
+from app.utils.phone_formatter import looks_like_base64, normalize_phone # Import new phone utility functions
 
 # For rate limiting
 from fastapi_limiter.depends import RateLimiter
@@ -146,23 +147,45 @@ async def initiate_payment(
     logger.info("Initiating payment request", user_id=authenticated_entity.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, service="payment")
 
     # Determine the actual user details for Chapa and notifications
+    user_details_for_chapa = None
     if authenticated_entity.role == "Service":
         # If authenticated via API key, fetch user details from User Management Service
-        user_details = await get_user_details_for_notification(payment_create.user_id)
-        if not user_details:
+        user_details_for_chapa = await get_user_details_for_notification(payment_create.user_id)
+        if not user_details_for_chapa:
             logger.error("User details not found for service-initiated payment.", user_id=payment_create.user_id, property_id=payment_create.property_id, service="payment")
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User details not found for the provided user_id")
-        actual_user_id = user_details.user_id
-        actual_user_email = user_details.email
-        actual_user_phone = user_details.phone_number
-        actual_user_lang = user_details.preferred_language
+        actual_user_id = user_details_for_chapa.user_id
+        actual_user_email = user_details_for_chapa.email
+        actual_user_phone_raw = user_details_for_chapa.phone_number
+        actual_user_lang = user_details_for_chapa.preferred_language
     else:
         # If authenticated via JWT (Owner role), use the authenticated_entity directly
-        user_details = authenticated_entity
+        user_details_for_chapa = authenticated_entity
         actual_user_id = authenticated_entity.user_id
         actual_user_email = authenticated_entity.email
-        actual_user_phone = authenticated_entity.phone_number
+        actual_user_phone_raw = authenticated_entity.phone_number
         actual_user_lang = authenticated_entity.preferred_language
+
+    # Decrypt and normalize phone number
+    decrypted_phone = None
+    if actual_user_phone_raw and looks_like_base64(actual_user_phone_raw):
+        try:
+            decrypted_phone = decrypt_data(actual_user_phone_raw)
+        except Exception:
+            # Fallback: try base64 decode if it was just base64 encoded (not encrypted with Fernet)
+            try:
+                decoded = base64.b64decode(actual_user_phone_raw).decode()
+                decrypted_phone = decoded
+            except Exception:
+                decrypted_phone = None
+    else:
+        decrypted_phone = actual_user_phone_raw
+
+    normalized_phone = normalize_phone(decrypted_phone) if decrypted_phone else None
+
+    if not normalized_phone:
+        logger.warning("Invalid or missing phone number for user, cannot initiate payment.", user_id=actual_user_id, service="payment")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User phone number invalid or not provided")
 
     # Idempotency check: Prevent duplicate payments for the same request.
     existing_payment = await db.execute(
@@ -196,10 +219,10 @@ async def initiate_payment(
         email=actual_user_email, # Use the authenticated user's email.
         first_name="Owner", # Placeholder, ideally get from User Management
         last_name="User",   # Placeholder
-        phone_number=actual_user_phone,
+        phone_number=normalized_phone, # Use the normalized phone number
         tx_ref=chapa_tx_ref,
         callback_url=f"{settings.BASE_URL}{settings.CHAPA_WEBHOOK_URL}",
-        return_url="https://your-rent-management-frontend.com/payment-status", # Placeholder for frontend return URL
+        return_url=f"{settings.BASE_URL}/payment-status", # Use BASE_URL for return
         customization={
             "title": "Listing Fee",
             "description": f"Payment for {payment_create.property_id}"
@@ -211,7 +234,7 @@ async def initiate_payment(
         }
     )
 
-    logger.info("Preparing to call Chapa service")
+    logger.info("Preparing to call Chapa service", user_id=actual_user_id, property_id=payment_create.property_id, phone_mask=f"{normalized_phone[:3]}***", service="payment")
     try:
         chapa_response = await chapa_service.initialize_payment(chapa_init_request)
         if chapa_response.status != "success":
@@ -238,13 +261,13 @@ async def initiate_payment(
 
         metrics_counters["total_payments"] += 1
         metrics_counters["pending_payments"] += 1
-        logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=actual_user_id, property_id=new_payment.property_id, checkout_url=checkout_url, service="payment")
+        logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=actual_user_id, property_id=new_payment.property_id, checkout_url_prefix=checkout_url[:30], service="payment")
 
         # Notify landlord about pending payment using the new notification service
         await notification_service.send_notification(
             user_id=str(actual_user_id),
             email=actual_user_email,
-            phone_number=actual_user_phone,
+            phone_number=normalized_phone, # Use normalized phone for notification
             preferred_language=actual_user_lang,
             template_name="payment_initiated",
             template_vars={
@@ -481,13 +504,26 @@ async def get_user_details_for_notification(user_id: uuid.UUID) -> NotificationP
             # Decrypt phone_number if it exists and is encrypted
             if "phone_number" in user_data and user_data["phone_number"]:
                 original_phone_number = user_data["phone_number"]
-                try:
-                    decrypted_phone_number = decrypt_data(original_phone_number)
-                    user_data["phone_number"] = decrypted_phone_number
-                except Exception:
-                    logger.warning("Phone number decryption failed in get_user_details_for_notification, using original value.", user_id=user_id, service="payment")
-                    user_data["phone_number"] = original_phone_number
+                decrypted_phone_number = None
+                if original_phone_number and looks_like_base64(original_phone_number):
+                    try:
+                        decrypted_phone_number = decrypt_data(original_phone_number)
+                    except Exception:
+                        try:
+                            decrypted_phone_number = base64.b64decode(original_phone_number).decode()
+                        except Exception:
+                            decrypted_phone_number = None
+                else:
+                    decrypted_phone_number = original_phone_number
 
+                normalized_phone = normalize_phone(decrypted_phone_number) if decrypted_phone_number else None
+
+                if normalized_phone:
+                    user_data["phone_number"] = normalized_phone
+                else:
+                    logger.warning("Phone number could not be decrypted or normalized for notification, using original value if available.", user_id=user_id, service="payment")
+                    user_data["phone_number"] = original_phone_number # Fallback to original if normalization fails
+            
             # Assuming User Management returns a structure compatible with NotificationPayload
             return NotificationPayload(**user_data)
         except httpx.RequestError as exc:
