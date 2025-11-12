@@ -145,7 +145,9 @@ async def create_payment(test_db):
 
 @pytest_asyncio.fixture(autouse=True)
 def mock_settings_encryption_key():
-    with patch('app.config.settings.ENCRYPTION_KEY', "a_32_byte_secret_key_for_aes_encryption"):
+    settings.ENCRYPTION_KEY = "a_32_byte_secret_key_for_aes_encryption" # Must be 32 bytes for AES-256
+settings.REDIS_URL = "redis://localhost:6379/1" # Use a different Redis DB for tests
+settings.PAYMENT_SERVICE_API_KEY = "test-api-key-for-service-to-service"
         yield
 
 @pytest_asyncio.fixture(autouse=True)

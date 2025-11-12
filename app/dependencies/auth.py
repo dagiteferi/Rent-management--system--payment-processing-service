@@ -1,9 +1,8 @@
-import httpx
 import json
 from datetime import datetime, timedelta
 import redis.asyncio as redis
 from fastapi import Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordBearer
+from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from jose import jwt, JWTError
 from app.config import settings
 from app.schemas.payment import UserAuthResponse
@@ -12,8 +11,23 @@ from app.core.logging import logger
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+
+async def get_api_key(api_key: str = Depends(api_key_header)) -> str:
+    if api_key is None:
+        return None # API key not provided
+    
+    if api_key == settings.PAYMENT_SERVICE_API_KEY:
+        logger.info("API Key authentication successful.")
+        return api_key
+    else:
+        logger.warning("Invalid API Key provided.", provided_key_prefix=api_key[:10] + "...")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Key"
+        )
 
 async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthResponse:
     credentials_exception = HTTPException(
@@ -108,3 +122,42 @@ async def get_current_owner(current_user: UserAuthResponse = Depends(get_current
         logger.warning("Attempt to perform owner action by non-owner.", user_id=current_user.user_id, role=current_user.role)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Only Owners can perform this action")
     return current_user
+
+async def get_authenticated_entity(
+    api_key: Optional[str] = Depends(get_api_key),
+    token: Optional[str] = Depends(oauth2_scheme)
+) -> UserAuthResponse:
+    """
+    Authenticates a request using either an API Key (for service-to-service)
+    or a JWT token (for owner users).
+    """
+    if api_key:
+        # If API key is present and valid, it's a service-to-service call.
+        # Return a dummy UserAuthResponse with a 'Service' role.
+        # The actual user_id for the payment will come from the request body.
+        logger.info("Request authenticated via API Key.")
+        return UserAuthResponse(
+            user_id=uuid.uuid4(), # Placeholder, actual user_id comes from payload
+            role="Service",
+            email="service@example.com", # Placeholder
+            phone_number="+251900000000", # Placeholder
+            preferred_language="en" # Placeholder
+        )
+    
+    if token:
+        try:
+            # If no API key, or API key was not valid, try JWT authentication for owner.
+            current_owner = await get_current_owner(token)
+            logger.info("Request authenticated via JWT (Owner role).")
+            return current_owner
+        except HTTPException as e:
+            # If JWT authentication fails, re-raise the exception
+            logger.warning("JWT authentication failed.", detail=e.detail)
+            raise e
+    
+    # If neither API key nor valid JWT owner token is provided, raise unauthorized.
+    logger.warning("Authentication failed: Neither valid API Key nor Owner JWT provided.")
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated: Provide a valid API Key or Owner JWT"
+    )

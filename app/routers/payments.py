@@ -8,7 +8,7 @@ from sqlalchemy import select
 import httpx
 
 from app.config import settings
-from app.dependencies.auth import get_current_owner, get_current_user
+from app.dependencies.auth import get_authenticated_entity
 from app.models.payment import Payment, PaymentStatus
 from app.schemas.payment import PaymentCreate, PaymentResponse, ChapaInitializeRequest, WebhookEvent, NotificationPayload, UserAuthResponse
 from app.services.chapa import chapa_service
@@ -129,11 +129,12 @@ async def get_metrics():
 @router.post("/payments/initiate", response_model=PaymentResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(RateLimiter(times=10, seconds=60))])
 async def initiate_payment(
     payment_create: PaymentCreate,
-    current_owner: UserAuthResponse = Depends(get_current_owner),
+    authenticated_entity: UserAuthResponse = Depends(get_authenticated_entity),
     db: AsyncSession = Depends(get_db)
 ):
     """
-    Initiates a payment for a property listing. Only accessible by users with the 'Owner' role.
+    Initiates a payment for a property listing. Accessible by users with the 'Owner' role
+    or by service-to-service calls using an API key.
     This endpoint is idempotent; sending the same `request_id` multiple times will not create duplicate payments.
 
     - **Idempotency**: Uses `request_id` to prevent duplicate payment initializations.
@@ -142,7 +143,26 @@ async def initiate_payment(
     - **Notifications**: Sends a notification to the user after successful initialization.
     """
     metrics_counters["initiate_calls"] += 1
-    logger.info("Initiating payment request", user_id=current_owner.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, service="payment")
+    logger.info("Initiating payment request", user_id=authenticated_entity.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, service="payment")
+
+    # Determine the actual user details for Chapa and notifications
+    if authenticated_entity.role == "Service":
+        # If authenticated via API key, fetch user details from User Management Service
+        user_details = await get_user_details_for_notification(payment_create.user_id)
+        if not user_details:
+            logger.error("User details not found for service-initiated payment.", user_id=payment_create.user_id, property_id=payment_create.property_id, service="payment")
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User details not found for the provided user_id")
+        actual_user_id = user_details.user_id
+        actual_user_email = user_details.email
+        actual_user_phone = user_details.phone_number
+        actual_user_lang = user_details.preferred_language
+    else:
+        # If authenticated via JWT (Owner role), use the authenticated_entity directly
+        user_details = authenticated_entity
+        actual_user_id = authenticated_entity.user_id
+        actual_user_email = authenticated_entity.email
+        actual_user_phone = authenticated_entity.phone_number
+        actual_user_lang = authenticated_entity.preferred_language
 
     # Idempotency check: Prevent duplicate payments for the same request.
     existing_payment = await db.execute(
@@ -173,10 +193,10 @@ async def initiate_payment(
     chapa_init_request = ChapaInitializeRequest(
         amount=str(payment_create.amount),
         currency="ETB",
-        email=current_owner.email, # Use the authenticated user's email.
+        email=actual_user_email, # Use the authenticated user's email.
         first_name="Owner", # Placeholder, ideally get from User Management
         last_name="User",   # Placeholder
-        phone_number=current_owner.phone_number,
+        phone_number=actual_user_phone,
         tx_ref=chapa_tx_ref,
         callback_url=f"{settings.BASE_URL}{settings.CHAPA_WEBHOOK_URL}",
         return_url="https://your-rent-management-frontend.com/payment-status", # Placeholder for frontend return URL
@@ -185,7 +205,7 @@ async def initiate_payment(
             "description": f"Payment for {payment_create.property_id}"
         },
         meta={
-            "user_id": str(current_owner.user_id),
+            "user_id": str(actual_user_id),
             "property_id": str(payment_create.property_id),
             "request_id": str(payment_create.request_id)
         }
@@ -195,7 +215,7 @@ async def initiate_payment(
     try:
         chapa_response = await chapa_service.initialize_payment(chapa_init_request)
         if chapa_response.status != "success":
-            logger.error("Chapa payment initialization failed", user_id=current_owner.user_id, property_id=payment_create.property_id, chapa_message=chapa_response.message, service="payment")
+            logger.error("Chapa payment initialization failed", user_id=actual_user_id, property_id=payment_create.property_id, chapa_message=chapa_response.message, service="payment")
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Payment initialization failed: {chapa_response.message}")
 
         checkout_url = chapa_response.data['checkout_url']
@@ -207,7 +227,7 @@ async def initiate_payment(
         new_payment = Payment(
             request_id=payment_create.request_id,
             property_id=payment_create.property_id,
-            user_id=current_owner.user_id,
+            user_id=actual_user_id,
             amount=payment_create.amount,
             status=PaymentStatus.PENDING,
             chapa_tx_ref=encrypted_chapa_tx_ref # Store the actual Chapa transaction reference
@@ -218,14 +238,14 @@ async def initiate_payment(
 
         metrics_counters["total_payments"] += 1
         metrics_counters["pending_payments"] += 1
-        logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=current_owner.user_id, property_id=new_payment.property_id, checkout_url=checkout_url, service="payment")
+        logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=actual_user_id, property_id=new_payment.property_id, checkout_url=checkout_url, service="payment")
 
         # Notify landlord about pending payment using the new notification service
         await notification_service.send_notification(
-            user_id=str(current_owner.user_id),
-            email=current_owner.email,
-            phone_number=current_owner.phone_number,
-            preferred_language=current_owner.preferred_language,
+            user_id=str(actual_user_id),
+            email=actual_user_email,
+            phone_number=actual_user_phone,
+            preferred_language=actual_user_lang,
             template_name="payment_initiated",
             template_vars={
                 "property_id": str(payment_create.property_id),
@@ -247,7 +267,7 @@ async def initiate_payment(
     except HTTPException:
         raise # Re-raise HTTPExceptions
     except Exception as e:
-        logger.exception("Error initiating payment", user_id=current_owner.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, service="payment")
+        logger.exception("Error initiating payment", user_id=actual_user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, service="payment")
         raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"Internal server error: {e}")
 
 @router.get("/payments/{payment_id}/status", response_model=PaymentResponse)

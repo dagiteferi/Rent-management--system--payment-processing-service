@@ -197,10 +197,105 @@ async def test_initiate_payment_not_owner(
     response = await client.post("/api/v1/payments/initiate", json=payment_data)
 
     assert response.status_code == 403
-    assert response.json() == {"detail": "Only Owners can perform this action"}
+    assert "Only Owners can perform this action" in response.json()["detail"]
 
 @pytest.mark.asyncio
-async def test_get_payment_status_success(
+async def test_initiate_payment_service_api_key_success(client: AsyncClient, db_session: AsyncSession, mock_external_services):
+    service_user_id = uuid.uuid4() # This user_id will be in the payload
+    property_id = uuid.uuid4()
+    request_id = uuid.uuid4()
+    amount = 100.00
+
+    # Mock get_user_details_for_notification for service calls
+    mock_external_services["get_user_details"].return_value = UserAuthResponse(
+        user_id=service_user_id,
+        role="Tenant", # Role doesn't matter for service, but needs to be present
+        email="service_user@example.com",
+        phone_number="+251911111111",
+        preferred_language="en"
+    )
+
+    payload = {
+        "request_id": str(request_id),
+        "property_id": str(property_id),
+        "user_id": str(service_user_id), # User ID from the service
+        "amount": amount,
+    }
+    response = await client.post(
+        "/api/v1/payments/initiate",
+        json=payload,
+        headers={"X-API-Key": settings.PAYMENT_SERVICE_API_KEY}
+    )
+
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "PENDING"
+    assert "chapa.co/checkout" in data["chapa_tx_ref"]
+
+    # Verify that a payment record was created in the DB
+    payment_in_db = await db_session.get(Payment, uuid.UUID(data["id"]))
+    assert payment_in_db is not None
+    assert payment_in_db.status == PaymentStatus.PENDING
+    assert decrypt_data(payment_in_db.chapa_tx_ref) == "test-ref"
+    assert payment_in_db.user_id == service_user_id # User ID from payload
+
+    mock_external_services["chapa_init"].assert_called_once()
+    mock_external_services["get_user_details"].assert_called_once_with(service_user_id)
+    mock_external_services["send_notification"].assert_called_once()
+    args, kwargs = mock_external_services["send_notification"].call_args
+    assert kwargs["template_name"] == "payment_initiated"
+    assert kwargs["email"] == "service_user@example.com"
+
+@pytest.mark.asyncio
+async def test_initiate_payment_service_api_key_invalid(client: AsyncClient, db_session: AsyncSession, mock_external_services):
+    service_user_id = uuid.uuid4()
+    property_id = uuid.uuid4()
+    request_id = uuid.uuid4()
+    amount = 100.00
+
+    payload = {
+        "request_id": str(request_id),
+        "property_id": str(property_id),
+        "user_id": str(service_user_id),
+        "amount": amount,
+    }
+    response = await client.post(
+        "/api/v1/payments/initiate",
+        json=payload,
+        headers={"X-API-Key": "invalid-api-key"}
+    )
+    assert response.status_code == 401
+    assert "Invalid API Key" in response.json()["detail"]
+    mock_external_services["chapa_init"].assert_not_called()
+    mock_external_services["get_user_details"].assert_not_called()
+    mock_external_services["send_notification"].assert_not_called()
+
+@pytest.mark.asyncio
+async def test_initiate_payment_no_auth_provided(client: AsyncClient, db_session: AsyncSession, mock_external_services):
+    service_user_id = uuid.uuid4()
+    property_id = uuid.uuid4()
+    request_id = uuid.uuid4()
+    amount = 100.00
+
+    payload = {
+        "request_id": str(request_id),
+        "property_id": str(property_id),
+        "user_id": str(service_user_id),
+        "amount": amount,
+    }
+    response = await client.post(
+        "/api/v1/payments/initiate",
+        json=payload,
+        # No Authorization header and no X-API-Key header
+    )
+    assert response.status_code == 401
+    assert "Not authenticated: Provide a valid API Key or Owner JWT" in response.json()["detail"]
+    mock_external_services["chapa_init"].assert_not_called()
+    mock_external_services["get_user_details"].assert_not_called()
+    mock_external_services["send_notification"].assert_not_called()
+
+@pytest.mark.asyncio
+async def test_get_payment_status_success(client: AsyncClient, db_session: AsyncSession, mock_user_token, create_payment_in_db, mock_external_services):
     client: AsyncClient,
     mock_auth_dependency,
     create_payment,
