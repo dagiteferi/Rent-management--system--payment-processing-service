@@ -139,7 +139,7 @@ async def get_current_owner(current_user: UserAuthResponse = Depends(get_current
 
 async def get_authenticated_entity(
     api_key: Optional[str] = Depends(get_api_key),
-    token: Optional[str] = Depends(oauth2_scheme)
+    owner_from_jwt: Optional[UserAuthResponse] = Depends(get_current_owner) # This will be None if not an owner or token invalid
 ) -> UserAuthResponse:
     """
     Authenticates a request using either an API Key (for service-to-service)
@@ -158,18 +158,12 @@ async def get_authenticated_entity(
             preferred_language="en" # Placeholder
         )
     
-    if token:
-        try:
-            # If no API key, or API key was not valid, try JWT authentication for owner.
-            current_owner = await get_current_owner(token)
-            logger.info("Request authenticated via JWT (Owner role).")
-            return current_owner
-        except HTTPException as e:
-            # If JWT authentication fails, re-raise the exception
-            logger.warning("JWT authentication failed.", detail=e.detail)
-            raise e
+    if owner_from_jwt:
+        # If an owner was successfully authenticated via JWT
+        logger.info("Request authenticated via JWT (Owner role).")
+        return owner_from_jwt
     
-    # If neither API key nor valid JWT owner token is provided, raise unauthorized.
+    # If neither API key nor valid JWT owner token is provided
     logger.warning("Authentication failed: Neither valid API Key nor Owner JWT provided.")
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
