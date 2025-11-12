@@ -476,8 +476,20 @@ async def get_user_details_for_notification(user_id: uuid.UUID) -> NotificationP
             )
             response.raise_for_status()
             logger.info("User details fetched for notification", user_id=user_id, service="payment")
+            
+            user_data = response.json()
+            # Decrypt phone_number if it exists and is encrypted
+            if "phone_number" in user_data and user_data["phone_number"]:
+                original_phone_number = user_data["phone_number"]
+                try:
+                    decrypted_phone_number = decrypt_data(original_phone_number)
+                    user_data["phone_number"] = decrypted_phone_number
+                except Exception:
+                    logger.warning("Phone number decryption failed in get_user_details_for_notification, using original value.", user_id=user_id, service="payment")
+                    user_data["phone_number"] = original_phone_number
+
             # Assuming User Management returns a structure compatible with NotificationPayload
-            return NotificationPayload(**response.json())
+            return NotificationPayload(**user_data)
         except httpx.RequestError as exc:
             logger.error("User Management service request error for notification", user_id=user_id, error=str(exc), service="payment")
             return None # Return None if service is unavailable
