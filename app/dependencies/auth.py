@@ -5,6 +5,8 @@ import redis.asyncio as redis
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, APIKeyHeader
 from jose import jwt, JWTError
+import httpx # Import httpx
+import uuid # Import uuid
 from app.config import settings
 from app.schemas.payment import UserAuthResponse
 from app.utils.retry import async_retry
