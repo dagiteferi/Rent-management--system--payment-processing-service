@@ -18,3 +18,4 @@ def encrypt_data(data: str) -> str:
 def decrypt_data(encrypted_data: str) -> str:
     """Decrypts an AES-256 encrypted string."""
     return f.decrypt(encrypted_data.encode('utf-8')).decode('utf-8')
+

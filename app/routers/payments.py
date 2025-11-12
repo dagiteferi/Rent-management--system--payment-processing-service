@@ -1,31 +1,25 @@
 import uuid
 from datetime import datetime, timedelta
 from collections import defaultdict
-
 from fastapi import APIRouter, Depends, HTTPException, status, Request, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 import httpx
-
 from app.config import settings
-from app.dependencies.auth import get_authenticated_entity, get_current_user # Added get_current_user
+from app.dependencies.auth import get_authenticated_entity, get_current_user # 
 from app.models.payment import Payment, PaymentStatus
 from app.schemas.payment import PaymentCreate, PaymentResponse, ChapaInitializeRequest, WebhookEvent, NotificationPayload, UserAuthResponse
 from app.services.chapa import chapa_service
 from app.core.security import encrypt_data, decrypt_data
-from app.dependencies.database import get_db, AsyncSessionLocal # Import get_db from new database dependency
+from app.dependencies.database import get_db, AsyncSessionLocal # 
 from app.utils.retry import async_retry
 from app.core.logging import logger # Import structured logger
 from app.services.notification import notification_service # Import new notification service
-from app.utils.phone_formatter import looks_like_base64, normalize_phone # Import new phone utility functions
+import base64 # Import base64
 
 # For rate limiting
 from fastapi_limiter.depends import RateLimiter
 
-# For optional Redis caching
-# import redis.asyncio as redis
-# from app.config import settings
-# redis_client = redis.from_url(settings.REDIS_URL, encoding="utf8", decode_responses=True)
 
 router = APIRouter()
 
@@ -49,7 +43,11 @@ async def timeout_pending_payments():
             payment.status = PaymentStatus.FAILED
             payment.updated_at = datetime.now()
             db.add(payment)
-            logger.info("Payment timed out and marked as FAILED.", payment_id=payment.id, user_id=payment.user_id, service="payment")
+            logger.info(
+                    "Payment timed out and marked as FAILED.", 
+                        payment_id=payment.id, 
+                        user_id=payment.user_id, service="payment"
+                        )
 
             # Update metrics
             metrics_counters["pending_payments"] -= 1
@@ -68,9 +66,13 @@ async def timeout_pending_payments():
                         template_vars={"property_id": str(payment.property_id)}
                     )
                 except Exception as e:
-                    logger.error("Failed to send timeout notification.", payment_id=payment.id, error=str(e), service="payment")
+                    logger.error("Failed to send timeout notification.", 
+                                 payment_id=payment.id, error=str(e), 
+                                 service="payment")
             else:
-                logger.warning("Could not fetch user details for timeout notification.", user_id=payment.user_id, payment_id=payment.id, service="payment")
+                logger.warning("Could not fetch user details for timeout notification.", 
+                               user_id=payment.user_id, payment_id=payment.id, 
+                               service="payment")
 
         await db.commit()
     logger.info("Timeout job for pending payments completed.", service="payment")
@@ -93,7 +95,7 @@ async def health_check(db: AsyncSession = Depends(get_db)):
         health_status["db_error"] = str(e)
         overall_healthy = False
 
-    # Check Chapa API Availability (e.g., by trying to get banks)
+ 
     try:
         await chapa_service.get_banks()
         health_status["chapa_api"] = "ok"
@@ -127,7 +129,10 @@ async def get_metrics():
         "timeout_jobs_run": metrics_counters["timeout_jobs_run"],
     }
 
-@router.post("/payments/initiate", response_model=PaymentResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(RateLimiter(times=10, seconds=60))])
+@router.post("/payments/initiate", 
+             response_model=PaymentResponse, 
+             status_code=status.HTTP_202_ACCEPTED, 
+             dependencies=[Depends(RateLimiter(times=10, seconds=60))])
 async def initiate_payment(
     payment_create: PaymentCreate,
     authenticated_entity: UserAuthResponse = Depends(get_authenticated_entity),
@@ -156,36 +161,21 @@ async def initiate_payment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User details not found for the provided user_id")
         actual_user_id = user_details_for_chapa.user_id
         actual_user_email = user_details_for_chapa.email
-        actual_user_phone_raw = user_details_for_chapa.phone_number
+        actual_user_phone = user_details_for_chapa.phone_number # Now unencrypted
         actual_user_lang = user_details_for_chapa.preferred_language
     else:
         # If authenticated via JWT (Owner role), use the authenticated_entity directly
         user_details_for_chapa = authenticated_entity
         actual_user_id = authenticated_entity.user_id
         actual_user_email = authenticated_entity.email
-        actual_user_phone_raw = authenticated_entity.phone_number
+        actual_user_phone = authenticated_entity.phone_number # Now unencrypted
         actual_user_lang = authenticated_entity.preferred_language
 
-    # Decrypt and normalize phone number
-    decrypted_phone = None
-    if actual_user_phone_raw and looks_like_base64(actual_user_phone_raw):
-        try:
-            decrypted_phone = decrypt_data(actual_user_phone_raw)
-        except Exception:
-            # Fallback: try base64 decode if it was just base64 encoded (not encrypted with Fernet)
-            try:
-                decoded = base64.b64decode(actual_user_phone_raw).decode()
-                decrypted_phone = decoded
-            except Exception:
-                decrypted_phone = None
-    else:
-        decrypted_phone = actual_user_phone_raw
-
-    normalized_phone = normalize_phone(decrypted_phone) if decrypted_phone else None
-
-    if not normalized_phone:
-        logger.warning("Invalid or missing phone number for user, cannot initiate payment.", user_id=actual_user_id, service="payment")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User phone number invalid or not provided")
+    # Phone number is now expected to be unencrypted and normalized from the User Management Service.
+    # We can add basic validation here if needed, but assuming User Management provides valid format.
+    if not actual_user_phone:
+        logger.warning("Missing phone number for user, cannot initiate payment.", user_id=actual_user_id, service="payment")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="User phone number not provided")
 
     # Idempotency check: Prevent duplicate payments for the same request.
     existing_payment = await db.execute(
@@ -219,7 +209,7 @@ async def initiate_payment(
         email=actual_user_email, # Use the authenticated user's email.
         first_name="Owner", # Placeholder, ideally get from User Management
         last_name="User",   # Placeholder
-        phone_number=normalized_phone, # Use the normalized phone number
+        phone_number=actual_user_phone, # Use the unencrypted phone number
         tx_ref=chapa_tx_ref,
         callback_url=f"{settings.BASE_URL}{settings.CHAPA_WEBHOOK_URL}",
         return_url=f"{settings.BASE_URL}/payment-status", # Use BASE_URL for return
@@ -234,7 +224,7 @@ async def initiate_payment(
         }
     )
 
-    logger.info("Preparing to call Chapa service", user_id=actual_user_id, property_id=payment_create.property_id, phone_mask=f"{normalized_phone[:3]}***", service="payment")
+    logger.info("Preparing to call Chapa service", user_id=actual_user_id, property_id=payment_create.property_id, phone_mask=f"{actual_user_phone[:3]}***", service="payment")
     try:
         chapa_response = await chapa_service.initialize_payment(chapa_init_request)
         if chapa_response.status != "success":
@@ -267,7 +257,7 @@ async def initiate_payment(
         await notification_service.send_notification(
             user_id=str(actual_user_id),
             email=actual_user_email,
-            phone_number=normalized_phone, # Use normalized phone for notification
+            phone_number=actual_user_phone, # Use unencrypted phone for notification
             preferred_language=actual_user_lang,
             template_name="payment_initiated",
             template_vars={
@@ -501,29 +491,14 @@ async def get_user_details_for_notification(user_id: uuid.UUID) -> NotificationP
             logger.info("User details fetched for notification", user_id=user_id, service="payment")
             
             user_data = response.json()
-            # Decrypt phone_number if it exists and is encrypted
+            # Phone number is now expected to be unencrypted from the User Management service.
+            # No decryption or normalization needed here.
             if "phone_number" in user_data and user_data["phone_number"]:
-                original_phone_number = user_data["phone_number"]
-                decrypted_phone_number = None
-                if original_phone_number and looks_like_base64(original_phone_number):
-                    try:
-                        decrypted_phone_number = decrypt_data(original_phone_number)
-                    except Exception:
-                        try:
-                            decrypted_phone_number = base64.b64decode(original_phone_number).decode()
-                        except Exception:
-                            decrypted_phone_number = None
-                else:
-                    decrypted_phone_number = original_phone_number
+                user_data["phone_number"] = user_data["phone_number"] # Ensure it's passed through
+            else:
+                logger.warning("Phone number not found for user in User Management service.", user_id=user_id, service="payment")
+                user_data["phone_number"] = "" # Default to empty string if not found
 
-                normalized_phone = normalize_phone(decrypted_phone_number) if decrypted_phone_number else None
-
-                if normalized_phone:
-                    user_data["phone_number"] = normalized_phone
-                else:
-                    logger.warning("Phone number could not be decrypted or normalized for notification, using original value if available.", user_id=user_id, service="payment")
-                    user_data["phone_number"] = original_phone_number # Fallback to original if normalization fails
-            
             # Assuming User Management returns a structure compatible with NotificationPayload
             return NotificationPayload(**user_data)
         except httpx.RequestError as exc:

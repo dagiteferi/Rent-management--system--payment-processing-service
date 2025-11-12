@@ -112,14 +112,9 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> UserAuthRespo
     # Decrypt phone_number if it exists and is encrypted
     if "phone_number" in user_data and user_data["phone_number"]:
         original_phone_number = user_data["phone_number"]
-        try:
-            decrypted_phone_number = decrypt_data(original_phone_number)
-            user_data["phone_number"] = decrypted_phone_number
-        except Exception: # Catch any exception from decrypt_data
-            # If decryption fails, assume it's either not encrypted or malformed.
-            # Use the original phone number as is.
-            logger.warning("Phone number decryption failed, using original value. This might indicate an unencrypted phone number or a decryption issue.", user_id=user_id)
-            user_data["phone_number"] = original_phone_number
+        #  phone numbers are now stored unencrypted in the User Management service
+        # No decryption needed .
+        user_data["phone_number"] = original_phone_number
     
     # 3. Store result in cache
     try:
