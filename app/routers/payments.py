@@ -8,7 +8,7 @@ from sqlalchemy import select
 import httpx
 
 from app.config import settings
-from app.dependencies.auth import get_authenticated_entity
+from app.dependencies.auth import get_authenticated_entity, get_current_user # Added get_current_user
 from app.models.payment import Payment, PaymentStatus
 from app.schemas.payment import PaymentCreate, PaymentResponse, ChapaInitializeRequest, WebhookEvent, NotificationPayload, UserAuthResponse
 from app.services.chapa import chapa_service
