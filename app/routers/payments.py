@@ -212,7 +212,7 @@ async def initiate_payment(
         phone_number=actual_user_phone, # Use the unencrypted phone number
         tx_ref=chapa_tx_ref,
         callback_url=f"{settings.BASE_URL}{settings.CHAPA_WEBHOOK_URL}",
-        return_url=f"{settings.BASE_URL}/payment-status", # Use BASE_URL for return
+        return_url=settings.FRONTEND_REDIRECT_URL, # Redirect to the frontend app
         customization={
             "title": "Listing Fee",
             "description": f"Payment for {payment_create.property_id}"

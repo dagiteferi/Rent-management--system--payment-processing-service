@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     BASE_URL: str = "http://localhost:8120"
     PAYMENT_SERVICE_API_KEY: str # New API key for service-to-service authentication
+    FRONTEND_REDIRECT_URL: str # URL for frontend redirect after payment
 
     # Payment timeout settings
     PAYMENT_TIMEOUT_DAYS: int = 7
