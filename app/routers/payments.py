@@ -474,8 +474,10 @@ async def confirm_payment_with_listing_service(property_id: uuid.UUID, payment_i
             "status": status.value
         }
         
+        headers = {"X-API-Key": settings.PAYMENT_SERVICE_API_KEY}
+
         try:
-            response = await client.post(endpoint_url, json=payload, timeout=10)
+            response = await client.post(endpoint_url, json=payload, headers=headers, timeout=10)
             response.raise_for_status()
             logger.info(
                 "Payment confirmation successfully sent to Property Listing Service.",
