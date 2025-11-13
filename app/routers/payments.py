@@ -53,26 +53,26 @@ async def timeout_pending_payments():
             metrics_counters["pending_payments"] -= 1
             metrics_counters["failed_payments"] += 1
 
-            # Fetch user details for notification
-            user_details = await get_user_details_for_notification(payment.user_id)
-            if user_details:
-                try:
-                    await notification_service.send_notification(
-                        user_id=user_details.user_id,
-                        email=user_details.email,
-                        phone_number=user_details.phone_number,
-                        preferred_language=user_details.preferred_language,
-                        template_name="payment_timed_out",
-                        template_vars={"property_id": str(payment.property_id)}
-                    )
-                except Exception as e:
-                    logger.error("Failed to send timeout notification.", 
-                                 payment_id=payment.id, error=str(e), 
-                                 service="payment")
-            else:
-                logger.warning("Could not fetch user details for timeout notification.", 
-                               user_id=payment.user_id, payment_id=payment.id, 
-                               service="payment")
+            # # Fetch user details for notification
+            # user_details = await get_user_details_for_notification(payment.user_id)
+            # if user_details:
+            #     try:
+            #         await notification_service.send_notification(
+            #             user_id=user_details.user_id,
+            #             email=user_details.email,
+            #             phone_number=user_details.phone_number,
+            #             preferred_language=user_details.preferred_language,
+            #             template_name="payment_timed_out",
+            #             template_vars={"property_id": str(payment.property_id)}
+            #         )
+            #     except Exception as e:
+            #         logger.error("Failed to send timeout notification.", 
+            #                      payment_id=payment.id, error=str(e), 
+            #                      service="payment")
+            # else:
+            #     logger.warning("Could not fetch user details for timeout notification.", 
+            #                    user_id=payment.user_id, payment_id=payment.id, 
+            #                    service="payment")
 
         await db.commit()
     logger.info("Timeout job for pending payments completed.", service="payment")
@@ -253,18 +253,18 @@ async def initiate_payment(
         metrics_counters["pending_payments"] += 1
         logger.info("Payment initiated and stored", payment_id=new_payment.id, user_id=actual_user_id, property_id=new_payment.property_id, checkout_url_prefix=checkout_url[:30], service="payment")
 
-        # Notify landlord about pending payment using the new notification service
-        await notification_service.send_notification(
-            user_id=str(actual_user_id),
-            email=actual_user_email,
-            phone_number=actual_user_phone, # Use unencrypted phone for notification
-            preferred_language=actual_user_lang,
-            template_name="payment_initiated",
-            template_vars={
-                "property_id": str(payment_create.property_id),
-                "payment_link": checkout_url
-            }
-        )
+        # # Notify landlord about pending payment using the new notification service
+        # await notification_service.send_notification(
+        #     user_id=str(actual_user_id),
+        #     email=actual_user_email,
+        #     phone_number=actual_user_phone, # Use unencrypted phone for notification
+        #     preferred_language=actual_user_lang,
+        #     template_name="payment_initiated",
+        #     template_vars={
+        #         "property_id": str(payment_create.property_id),
+        #         "payment_link": checkout_url
+        #     }
+        # )
 
         return PaymentResponse(
             id=new_payment.id,
@@ -443,20 +443,20 @@ async def chapa_webhook(
         except Exception as e:
             logger.error("Failed to send payment confirmation to Property Listing Service.", payment_id=found_payment.id, error=str(e), service="payment")
 
-    # Notify landlord/admin using the new notification service
-    user_details = await get_user_details_for_notification(found_payment.user_id)
+    # # Notify landlord/admin using the new notification service
+    # user_details = await get_user_details_for_notification(found_payment.user_id)
 
-    template_name = "payment_success" if new_status == PaymentStatus.SUCCESS else "payment_failed"
-    await notification_service.send_notification(
-        user_id=str(found_payment.user_id),
-        email=user_details.email if user_details else "admin@example.com", # Fallback
-        phone_number=user_details.phone_number if user_details else "+251900000000", # Fallback
-        preferred_language=user_details.preferred_language if user_details else "en", # Fallback
-        template_name=template_name,
-        template_vars={
-            "property_id": str(found_payment.property_id)
-        }
-    )
+    # template_name = "payment_success" if new_status == PaymentStatus.SUCCESS else "payment_failed"
+    # await notification_service.send_notification(
+    #     user_id=str(found_payment.user_id),
+    #     email=user_details.email if user_details else "admin@example.com", # Fallback
+    #     phone_number=user_details.phone_number if user_details else "+251900000000", # Fallback
+    #     preferred_language=user_details.preferred_language if user_details else "en", # Fallback
+    #     template_name=template_name,
+    #     template_vars={
+    #         "property_id": str(found_payment.property_id)
+    #     }
+    # )
 
     return {"message": "Webhook processed successfully"}
 
