@@ -477,7 +477,14 @@ async def confirm_payment_with_listing_service(property_id: uuid.UUID, payment_i
         try:
             response = await client.post(endpoint_url, json=payload, timeout=10)
             response.raise_for_status()
-            logger.info("Payment confirmation sent to Property Listing Service.", payment_id=payment_id, property_id=property_id, status=status.value, service="payment")
+            logger.info(
+                "Payment confirmation successfully sent to Property Listing Service.",
+                payment_id=payment_id,
+                property_id=property_id,
+                status=status.value,
+                listing_service_response=response.json(), # Log the response from the listing service
+                service="payment"
+            )
             return response.json()
         except httpx.RequestError as exc:
             logger.error("Property Listing service request error during payment confirmation.", property_id=property_id, error=str(exc), service="payment")
