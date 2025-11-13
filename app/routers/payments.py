@@ -435,10 +435,13 @@ async def chapa_webhook(
     # Trigger Property Listing service for approval if successful
     if new_status == PaymentStatus.SUCCESS:
         try:
-            await approve_property_listing(found_payment.property_id)
-            logger.info("Property approved via Property Listing Service.", property_id=found_payment.property_id, payment_id=found_payment.id, service="payment")
+            await confirm_payment_with_listing_service(
+                property_id=found_payment.property_id,
+                payment_id=found_payment.id,
+                status=new_status
+            )
         except Exception as e:
-            logger.error("Failed to approve property via Property Listing Service", property_id=found_payment.property_id, payment_id=found_payment.id, error=str(e), service="payment")
+            logger.error("Failed to send payment confirmation to Property Listing Service.", payment_id=found_payment.id, error=str(e), service="payment")
 
     # Notify landlord/admin using the new notification service
     user_details = await get_user_details_for_notification(found_payment.user_id)
@@ -458,21 +461,29 @@ async def chapa_webhook(
     return {"message": "Webhook processed successfully"}
 
 @async_retry(max_attempts=3, delay=1, exceptions=(httpx.RequestError, HTTPException))
-async def approve_property_listing(property_id: uuid.UUID):
+async def confirm_payment_with_listing_service(property_id: uuid.UUID, payment_id: uuid.UUID, status: PaymentStatus):
+    """Sends a confirmation to the property listing service about a payment's status."""
     async with httpx.AsyncClient() as client:
+        # The user provided a URL that might contain extra paths, so we build the base URL safely
+        base_url = settings.PROPERTY_LISTING_SERVICE_URL.replace("/docs/api/v1", "").rstrip('/')
+        endpoint_url = f"{base_url}/api/v1/payments/confirm"
+        
+        payload = {
+            "property_id": str(property_id),
+            "payment_id": str(payment_id),
+            "status": status.value
+        }
+        
         try:
-            response = await client.post(
-                f"{settings.PROPERTY_LISTING_SERVICE_URL}/properties/{property_id}/approve",
-                timeout=5
-            )
+            response = await client.post(endpoint_url, json=payload, timeout=10)
             response.raise_for_status()
-            logger.info("Property listing approval request sent", property_id=property_id, service="payment")
+            logger.info("Payment confirmation sent to Property Listing Service.", payment_id=payment_id, property_id=property_id, status=status.value, service="payment")
             return response.json()
         except httpx.RequestError as exc:
-            logger.error("Property Listing service request error", property_id=property_id, error=str(exc), service="payment")
+            logger.error("Property Listing service request error during payment confirmation.", property_id=property_id, error=str(exc), service="payment")
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Property Listing service unavailable")
         except httpx.HTTPStatusError as exc:
-            logger.error("Property Listing service error", property_id=property_id, status_code=exc.response.status_code, response_text=exc.response.text, service="payment")
+            logger.error("Property Listing service error during payment confirmation.", property_id=property_id, status_code=exc.response.status_code, response_text=exc.response.text, service="payment")
             raise HTTPException(status_code=exc.response.status_code, detail="Property Listing service error")
 
 @async_retry(max_attempts=3, delay=1, exceptions=(httpx.RequestError, HTTPException))
