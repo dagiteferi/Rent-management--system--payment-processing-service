@@ -24,7 +24,9 @@ class Settings(BaseSettings):
     CHAPA_WEBHOOK_URL: str = "/api/v1/webhook/chapa" 
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
-    BASE_URL: str = "https://rent-management-system-payment.onrender.com"
+    # BASE_URL: str = "https://rent-management-system-payment.onrender.com"
+    BASE_URL: str = "https://unconceding-annabella-nonsimulate.ngrok-free.app"
+
     PAYMENT_SERVICE_API_KEY: str # New API key for service-to-service authentication
     FRONTEND_REDIRECT_URL: str # URL for frontend redirect after payment
 

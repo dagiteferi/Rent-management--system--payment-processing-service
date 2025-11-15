@@ -22,7 +22,8 @@ class PaymentUpdate(BaseModel):
 class PaymentResponse(PaymentBase):
     id: uuid.UUID
     status: PaymentStatus
-    chapa_tx_ref: str # This will be encrypted in DB, but for response, we might decrypt or omit
+    chapa_tx_ref: Optional[str] = None # Made optional, as checkout_url is primary for client
+    checkout_url: Optional[str] = None # Added checkout_url field
     created_at: datetime
     updated_at: datetime
     failure_reason: Optional[str] = None
