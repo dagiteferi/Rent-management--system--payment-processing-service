@@ -22,12 +22,14 @@ def configure_logging():
     logging.basicConfig(
         format="%(message)s",
         stream=sys.stdout,
-        level=logging.DEBUG,
+        level=logging.INFO, # Set default level to INFO
     )
 
-    # Optionally, configure specific loggers
-    # logging.getLogger("uvicorn").handlers = [logging.StreamHandler(sys.stdout)]
-    # logging.getLogger("uvicorn.access").handlers = [logging.StreamHandler(sys.stdout)]
+    # Set uvicorn and other noisy loggers to WARNING unless in debug mode
+    # In a real app, you might control this with an environment variable
+    logging.getLogger("uvicorn").setLevel(logging.INFO)
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
     # Create a default logger for the application
     return structlog.get_logger("app")

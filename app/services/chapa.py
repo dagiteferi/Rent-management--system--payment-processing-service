@@ -32,8 +32,8 @@ class ChapaService:
                 payload = payment_data.model_dump()
                 payload["amount"] = str(settings.FIXED_AMOUNT)
 
-                logger.debug("Chapa initialize_payment request headers", headers=self.headers)
-                logger.debug("Chapa initialize_payment request body", body=payload)
+                logger.info("Chapa initialize_payment request headers", headers=self.headers)
+                logger.info("Chapa initialize_payment request body", body=payload)
                 response = await client.post(url, json=payload, headers=self.headers, timeout=10)
                 response.raise_for_status()
                 logger.info("Chapa payment initialization successful", tx_ref=payment_data.tx_ref)
@@ -51,8 +51,8 @@ class ChapaService:
                 logger.error("Chapa initialize_payment HTTPStatusError (server error)", tx_ref=payment_data.tx_ref, status_code=exc.response.status_code, response_text=exc.response.text)
                 raise
                 
-                logger.debug("Chapa initialize_payment request headers", headers=self.headers)
-                logger.debug("Chapa initialize_payment request body", body=payload)
+                logger.info("Chapa initialize_payment request headers", headers=self.headers)
+                logger.info("Chapa initialize_payment request body", body=payload)
                 response = await client.post(url, json=payload, headers=self.headers, timeout=10)
                 response.raise_for_status()
                 logger.info("Chapa payment initialization successful", tx_ref=payment_data.tx_ref)
@@ -74,7 +74,7 @@ class ChapaService:
         url = f"{self.base_url}/transaction/verify/{transaction_reference}"
         async with httpx.AsyncClient() as client:
             try:
-                logger.debug("Chapa verify_payment request headers", headers=self.headers)
+                logger.info("Chapa verify_payment request headers", headers=self.headers)
                 response = await client.get(url, headers=self.headers, timeout=10)
                 response.raise_for_status()
                 logger.info("Chapa payment verification successful", tx_ref=transaction_reference)
@@ -90,7 +90,7 @@ class ChapaService:
         url = f"{self.base_url}/banks"
         async with httpx.AsyncClient() as client:
             try:
-                logger.debug("Chapa get_banks request headers", headers=self.headers)
+                logger.info("Chapa get_banks request headers", headers=self.headers)
                 response = await client.get(url, headers=self.headers, timeout=10)
                 response.raise_for_status()
                 logger.info("Successfully fetched banks from Chapa")

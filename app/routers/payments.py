@@ -226,9 +226,6 @@ async def initiate_payment(
         checkout_url = chapa_response.data.get('checkout_url') # Use .get() for safety
         logger.info("Extracted checkout_url from Chapa response", checkout_url=checkout_url, service="payment")
 
-        # Encrypt chapa_tx_ref (which is the actual transaction reference, not the checkout URL) before storing
-        encrypted_chapa_tx_ref = encrypt_data(chapa_tx_ref)
-
         # Store payment in DB
         new_payment = Payment(
             request_id=payment_create.request_id,
@@ -236,7 +233,7 @@ async def initiate_payment(
             user_id=actual_user_id,
             amount=payment_create.amount,
             status=PaymentStatus.PENDING,
-            chapa_tx_ref=encrypted_chapa_tx_ref # Store the actual Chapa transaction reference
+            chapa_tx_ref=chapa_tx_ref # Store the actual Chapa transaction reference
         )
         db.add(new_payment)
         await db.commit()
@@ -252,7 +249,7 @@ async def initiate_payment(
             user_id=new_payment.user_id,
             amount=new_payment.amount,
             status=new_payment.status,
-            chapa_tx_ref="********", # Masking for security in response
+            chapa_tx_ref=chapa_tx_ref, # Return the actual chapa_tx_ref
             checkout_url=checkout_url, # Return checkout URL here for the client
             created_at=new_payment.created_at,
             updated_at=new_payment.updated_at
@@ -310,7 +307,7 @@ async def chapa_webhook(
     Verifies webhook signature for authenticity.
     """
     metrics_counters["webhook_calls"] += 1
-    logger.info("Received Chapa webhook notification", method=request.method, service="payment")
+    logger.info("Received Chapa webhook notification", method=request.method, headers=request.headers, service="payment")
 
     chapa_tx_ref = None
     transaction_status = None
@@ -319,7 +316,7 @@ async def chapa_webhook(
 
     if request.method == "POST":
         payload_body = await request.body()
-        logger.info("Received Chapa webhook (POST)", payload_size=len(payload_body), service="payment")
+        logger.info("Received Chapa webhook (POST)", payload_size=len(payload_body), raw_body=payload_body.decode('utf-8'), service="payment")
 
         # 1. Verify webhook signature for POST requests
         if not x_chapa_signature:
@@ -367,20 +364,12 @@ async def chapa_webhook(
     # Search for the payment using the decrypted tx_ref
     # We search all payments, not just PENDING, in case the webhook is delayed
     # or the payment was already processed by another mechanism.
-    all_payments_stmt = select(Payment)
+    all_payments_stmt = select(Payment).where(Payment.chapa_tx_ref == chapa_tx_ref)
     all_payments_result = await db.execute(all_payments_stmt)
-    all_payments = all_payments_result.scalars().all()
+    found_payment = all_payments_result.scalar_one_or_none()
 
-    for payment in all_payments:
-        try:
-            decrypted_ref = decrypt_data(payment.chapa_tx_ref)
-            if decrypted_ref == chapa_tx_ref:
-                found_payment = payment
-                logger.info("Payment found in DB", payment_id=payment.id, current_db_status=payment.status, service="payment")
-                break
-        except Exception as e:
-            logger.error("Error decrypting chapa_tx_ref for payment", payment_id=payment.id, error=str(e), service="payment")
-            continue
+    if found_payment:
+        logger.info("Payment found in DB", payment_id=found_payment.id, current_db_status=found_payment.status, service="payment")
 
     if not found_payment:
         logger.warning("No payment found for Chapa tx_ref", chapa_tx_ref=chapa_tx_ref, service="payment")
