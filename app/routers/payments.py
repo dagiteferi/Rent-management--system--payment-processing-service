@@ -54,6 +54,17 @@ async def timeout_pending_payments():
             metrics_counters["pending_payments"] -= 1
             metrics_counters["failed_payments"] += 1
 
+            # Optionally notify Property Listing Service to reject the property
+            try:
+                await confirm_payment_with_listing_service(
+                    property_id=payment.property_id,
+                    payment_id=payment.id,
+                    status=PaymentStatus.FAILED
+                )
+                logger.info("Notified Property Listing Service about timed out payment.", payment_id=payment.id, property_id=payment.property_id, service="payment")
+            except Exception as e:
+                logger.error("Failed to notify Property Listing Service about timed out payment.", payment_id=payment.id, error=str(e), service="payment")
+
         await db.commit()
     logger.info("Timeout job for pending payments completed.", service="payment")
 
@@ -129,7 +140,7 @@ async def initiate_payment(
     - **Notifications**: Sends a notification to the user after successful initialization.
     """
     metrics_counters["initiate_calls"] += 1
-    logger.info("Initiating payment request", user_id=authenticated_entity.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, service="payment")
+    logger.info("Initiating payment request", user_id=authenticated_entity.user_id, property_id=payment_create.property_id, request_id=payment_create.request_id, amount=500, service="payment")
 
     # Determine the actual user details for Chapa and notifications
     user_details_for_chapa = None
@@ -141,14 +152,14 @@ async def initiate_payment(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User details not found for the provided user_id")
         actual_user_id = user_details_for_chapa.user_id
         actual_user_email = user_details_for_chapa.email
-        actual_user_phone = user_details_for_chapa.phone_number # Now unencrypted
+        actual_user_phone = user_details_for_chapa.phone_number # Re-introduced
         actual_user_lang = user_details_for_chapa.preferred_language
     else:
         # If authenticated via JWT (Owner role), use the authenticated_entity directly
         user_details_for_chapa = authenticated_entity
         actual_user_id = authenticated_entity.user_id
         actual_user_email = authenticated_entity.email
-        actual_user_phone = authenticated_entity.phone_number # Now unencrypted
+        actual_user_phone = authenticated_entity.phone_number # Re-introduced
         actual_user_lang = authenticated_entity.preferred_language
 
     # Phone number is now expected to be unencrypted and normalized from the User Management Service.
@@ -173,26 +184,27 @@ async def initiate_payment(
             amount=existing_payment.amount,
             status=existing_payment.status,
             # The checkout URL is not stored; decrypt the original tx_ref if needed, but masking is safer.
-            chapa_tx_ref="********", 
+            chapa_tx_ref="********",
             created_at=existing_payment.created_at,
             updated_at=existing_payment.updated_at
         )
 
     # Generate a unique transaction reference for this payment attempt.
     chapa_tx_ref = f"tx-{uuid.uuid4()}"
+    logger.info("Generated Chapa transaction reference", chapa_tx_ref=chapa_tx_ref, service="payment")
 
     # Prepare the request for the Chapa API.
     # Note: Chapa's sandbox may require a non-test domain for emails (e.g., not 'example.com').
     chapa_init_request = ChapaInitializeRequest(
-        amount=str(payment_create.amount),
+        amount=str(500), # Fixed amount for Chapa API
         currency="ETB",
         email=actual_user_email, # Use the authenticated user's email.
         first_name="Owner", # Placeholder, ideally get from User Management
         last_name="User",   # Placeholder
-        phone_number=actual_user_phone, # Use the unencrypted phone number
+        phone_number=actual_user_phone, # Changed from mobile to phone_number
         tx_ref=chapa_tx_ref,
         callback_url=f"{settings.BASE_URL}/api/v1/webhook/chapa", # Server-to-server POST
-        return_url=f"{settings.BASE_URL}/api/v1/payments/return", # User-facing GET redirect
+        return_url=settings.FRONTEND_REDIRECT_URL, # Redirect to the frontend app
         customization={
             "title": "Listing Fee",
             "description": f"Payment for {payment_create.property_id}"
@@ -285,26 +297,72 @@ async def get_payment_status(
 
     return response_data
 
-@router.get("/payments/return", status_code=status.HTTP_200_OK, include_in_schema=False)
-async def chapa_return(
+@router.api_route("/webhook/chapa", methods=["GET", "POST"], status_code=status.HTTP_200_OK)
+async def chapa_webhook(
     request: Request,
     db: AsyncSession = Depends(get_db),
-    trx_ref: str = None,
-    status: str = None,
+    x_chapa_signature: str = Header(None, include_in_schema=False) # Chapa webhook signature header
 ):
+    
     """
-    Handles the user-facing return from Chapa after a payment attempt.
-    This endpoint is triggered when the user's browser is redirected from Chapa.
-    It verifies the payment status as a GET request and then redirects the user 
-    to the appropriate frontend page.
+    Handles Chapa webhooks for payment status updates.
+    Verifies webhook signature for authenticity.
     """
-    logger.info("Received Chapa return redirect", trx_ref=trx_ref, status=status, service="payment")
+    metrics_counters["webhook_calls"] += 1
+    
+    chapa_tx_ref = None
+    transaction_status = None
+    webhook_user_id = None
+    webhook_property_id = None
 
-    if not trx_ref:
-        logger.warning("Chapa return redirect missing trx_ref.", service="payment")
-        return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status=failed&reason=invalid_return")
+    if request.method == "POST":
+        payload_body = await request.body()
+        logger.info("Received Chapa webhook (POST)", payload_size=len(payload_body), service="payment")
+
+        # 1. Verify webhook signature for POST requests
+        if not x_chapa_signature:
+            logger.error("Webhook received without X-Chapa-Signature header.", service="payment")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="X-Chapa-Signature header missing")
+
+        if not chapa_service.verify_webhook_signature(payload_body, x_chapa_signature):
+            logger.error("Invalid Chapa webhook signature.", received_signature=x_chapa_signature, service="payment")
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature")
+
+        try:
+            payload = await request.json()
+            event_data = payload.get("data", {})
+            chapa_tx_ref = event_data.get("tx_ref")
+            transaction_status = event_data.get("status")
+            meta_data = event_data.get("meta", {})
+            webhook_user_id = meta_data.get("user_id")
+            webhook_property_id = meta_data.get("property_id")
+            logger.info("Parsed POST webhook payload", chapa_tx_ref=chapa_tx_ref, transaction_status=transaction_status, meta_data=meta_data, service="payment")
+        except Exception as e:
+            logger.error("Could not parse webhook payload as JSON (POST)", error=str(e), payload_body=payload_body.decode(), service="payment")
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
+
+    elif request.method == "GET":
+        logger.info("Received Chapa webhook (GET redirect)", query_params=request.query_params, service="payment")
+        chapa_tx_ref = request.query_params.get("trx_ref")
+        transaction_status = request.query_params.get("status")
+        logger.info("Parsed GET redirect query parameters", chapa_tx_ref=chapa_tx_ref, transaction_status=transaction_status, service="payment")
+        # For GET redirects, meta data might not be directly available or needs to be extracted differently
+        # We will rely on the stored payment record for user_id and property_id later.
+
+    if not chapa_tx_ref or not transaction_status:
+        logger.error("Invalid webhook/redirect payload: missing tx_ref or status.", chapa_tx_ref=chapa_tx_ref, transaction_status=transaction_status, service="payment")
+        # For GET redirects, we should redirect to frontend with an error
+        if request.method == "GET":
+            return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status=failed&reason=missing_params")
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook/redirect payload")
+
+    logger.info("Processing Chapa webhook/redirect", chapa_tx_ref=chapa_tx_ref, transaction_status=transaction_status, user_id=webhook_user_id, property_id=webhook_property_id, service="payment")
 
     found_payment = None
+    logger.info("Searching for payment in DB", search_tx_ref=chapa_tx_ref, service="payment")
+    # Search for the payment using the decrypted tx_ref
+    # We search all payments, not just PENDING, in case the webhook is delayed
+    # or the payment was already processed by another mechanism.
     all_payments_stmt = select(Payment)
     all_payments_result = await db.execute(all_payments_stmt)
     all_payments = all_payments_result.scalars().all()
@@ -312,150 +370,83 @@ async def chapa_return(
     for payment in all_payments:
         try:
             decrypted_ref = decrypt_data(payment.chapa_tx_ref)
-            if decrypted_ref == trx_ref:
-                found_payment = payment
-                break
-        except Exception:
-            continue
-
-    if not found_payment:
-        logger.warning("No payment found for Chapa trx_ref in return redirect", trx_ref=trx_ref, service="payment")
-        return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status=failed&reason=not_found")
-
-    if found_payment.status != PaymentStatus.PENDING:
-        logger.info("Payment already processed, redirecting user", payment_id=found_payment.id, current_status=found_payment.status, service="payment")
-        redirect_status = "success" if found_payment.status == PaymentStatus.SUCCESS else "failed"
-        return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status={redirect_status}&payment_id={found_payment.id}")
-
-    try:
-        verification_response = await chapa_service.verify_payment(trx_ref)
-        if verification_response.status == "success" and verification_response.data.get("status") == "success":
-            new_status = PaymentStatus.SUCCESS
-        else:
-            new_status = PaymentStatus.FAILED
-    except Exception as e:
-        logger.error("Error verifying payment with Chapa API in return redirect", trx_ref=trx_ref, error=str(e), service="payment")
-        new_status = PaymentStatus.FAILED
-
-    found_payment.status = new_status
-    found_payment.updated_at = datetime.now()
-    db.add(found_payment)
-    await db.commit()
-    await db.refresh(found_payment)
-    logger.info("Payment status updated via return redirect", payment_id=found_payment.id, new_status=new_status, service="payment")
-
-    if new_status == PaymentStatus.SUCCESS:
-        try:
-            await confirm_payment_with_listing_service(
-                property_id=found_payment.property_id,
-                payment_id=found_payment.id,
-                status=new_status
-            )
-        except Exception as e:
-            logger.error("Failed to send payment confirmation to Property Listing Service from return redirect.", payment_id=found_payment.id, error=str(e), service="payment")
-            return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status=success&payment_id={found_payment.id}&issue=confirmation_failed")
-
-    redirect_status = "success" if new_status == PaymentStatus.SUCCESS else "failed"
-    return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status={redirect_status}&payment_id={found_payment.id}")
-
-
-@router.post("/webhook/chapa", status_code=status.HTTP_200_OK)
-async def chapa_webhook(
-    request: Request,
-    db: AsyncSession = Depends(get_db),
-    x_chapa_signature: str = Header(None) # Chapa webhook signature header
-):
-    """
-    Handles Chapa webhooks for payment status updates.
-    Verifies webhook signature for authenticity.
-    """
-    metrics_counters["webhook_calls"] += 1
-    payload_body = await request.body()
-    logger.info("Received Chapa webhook", payload_size=len(payload_body), service="payment")
-
-    if not x_chapa_signature:
-        logger.error("Webhook received without X-Chapa-Signature header.", service="payment")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="X-Chapa-Signature header missing")
-
-    if not chapa_service.verify_webhook_signature(payload_body, x_chapa_signature):
-        logger.error("Invalid Chapa webhook signature.", received_signature=x_chapa_signature, service="payment")
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid webhook signature")
-
-    try:
-        payload = await request.json()
-    except Exception as e:
-        logger.error("Could not parse webhook payload as JSON", error=str(e), payload_body=payload_body.decode(), service="payment")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON payload")
-
-    event_data = payload.get("data", {})
-    chapa_tx_ref = event_data.get("tx_ref")
-    transaction_status = event_data.get("status")
-    meta_data = event_data.get("meta", {})
-    webhook_user_id = meta_data.get("user_id")
-    webhook_property_id = meta_data.get("property_id")
-
-    if not chapa_tx_ref or not transaction_status:
-        logger.error("Invalid webhook payload: missing tx_ref or status.", payload=payload, service="payment")
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid webhook payload")
-
-    logger.info("Processing Chapa webhook", chapa_tx_ref=chapa_tx_ref, transaction_status=transaction_status, user_id=webhook_user_id, property_id=webhook_property_id, service="payment")
-
-    found_payment = None
-    pending_payments_stmt = select(Payment).where(Payment.status == PaymentStatus.PENDING)
-    pending_payments_result = await db.execute(pending_payments_stmt)
-    all_pending_payments = pending_payments_result.scalars().all()
-
-    for payment in all_pending_payments:
-        try:
-            decrypted_ref = decrypt_data(payment.chapa_tx_ref)
             if decrypted_ref == chapa_tx_ref:
                 found_payment = payment
+                logger.info("Payment found in DB", payment_id=payment.id, current_db_status=payment.status, service="payment")
                 break
         except Exception as e:
             logger.error("Error decrypting chapa_tx_ref for payment", payment_id=payment.id, error=str(e), service="payment")
             continue
 
     if not found_payment:
-        logger.warning("No PENDING payment found for Chapa tx_ref", chapa_tx_ref=chapa_tx_ref, service="payment")
-        return {"message": "Payment not found or not in PENDING state, no action taken"}
+        logger.warning("No payment found for Chapa tx_ref", chapa_tx_ref=chapa_tx_ref, service="payment")
+        if request.method == "GET":
+            return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status=failed&reason=not_found")
+        return {"message": "Payment not found, no action taken"}
 
+    # If payment is already processed, just redirect the user or return success
     if found_payment.status != PaymentStatus.PENDING:
         logger.info("Payment already processed, skipping update", payment_id=found_payment.id, current_status=found_payment.status, service="payment")
+        if request.method == "GET":
+            redirect_status = "success" if found_payment.status == PaymentStatus.SUCCESS else "failed"
+            return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status={redirect_status}&payment_id={found_payment.id}")
         return {"message": "Payment already processed, no action taken"}
 
+    logger.info("Verifying payment with Chapa API", chapa_tx_ref=chapa_tx_ref, service="payment")
+    # Verify payment with Chapa API to confirm status (double-check)
     try:
         verification_response = await chapa_service.verify_payment(chapa_tx_ref)
-        if verification_response.status != "success" or verification_response.data.get("status") != "success":
-            logger.warning("Chapa API verification failed", chapa_tx_ref=chapa_tx_ref, api_status=verification_response.status, data_status=verification_response.data.get("status"), service="payment")
-            new_status = PaymentStatus.FAILED
-        else:
+        logger.info("Chapa API verification response", chapa_tx_ref=chapa_tx_ref, api_status=verification_response.status, data_status=verification_response.data.get("status"), service="payment")
+        if verification_response.status == "success" and verification_response.data.get("status") == "success":
             new_status = PaymentStatus.SUCCESS
+        else:
+            new_status = PaymentStatus.FAILED
+            found_payment.failure_reason = f"Chapa verification failed: {verification_response.message} - {verification_response.data.get('status')}"
     except Exception as e:
         logger.error("Error verifying payment with Chapa API", chapa_tx_ref=chapa_tx_ref, error=str(e), service="payment")
-        new_status = PaymentStatus.FAILED
+        new_status = PaymentStatus.FAILED # Default to failed if verification fails
+        found_payment.failure_reason = f"Chapa verification API error: {e}"
 
+    logger.info("Updating payment status in DB", payment_id=found_payment.id, old_status=found_payment.status, new_status=new_status, service="payment")
+    # Update payment status in DB
     found_payment.status = new_status
     found_payment.updated_at = datetime.now()
+    if new_status == PaymentStatus.SUCCESS:
+        found_payment.approved_at = datetime.now()
     db.add(found_payment)
     await db.commit()
     await db.refresh(found_payment)
-    logger.info("Payment status updated", payment_id=found_payment.id, old_status=PaymentStatus.PENDING, new_status=new_status, service="payment")
+    logger.info("Payment status updated successfully in DB", payment_id=found_payment.id, final_status=new_status, service="payment")
 
+    # Update metrics
     metrics_counters["pending_payments"] -= 1
     if new_status == PaymentStatus.SUCCESS:
         metrics_counters["success_payments"] += 1
     else:
         metrics_counters["failed_payments"] += 1
 
+    # Trigger Property Listing service for approval if successful
     if new_status == PaymentStatus.SUCCESS:
+        logger.info("Attempting to confirm payment with Property Listing Service", payment_id=found_payment.id, property_id=found_payment.property_id, service="payment")
         try:
-            await confirm_payment_with_listing_service(
+            listing_service_response = await confirm_payment_with_listing_service(
                 property_id=found_payment.property_id,
                 payment_id=found_payment.id,
                 status=new_status
             )
+            logger.info("Payment confirmation sent to Property Listing Service", payment_id=found_payment.id, property_id=found_payment.property_id, listing_service_response=listing_service_response, service="payment")
         except Exception as e:
             logger.error("Failed to send payment confirmation to Property Listing Service.", payment_id=found_payment.id, error=str(e), service="payment")
+            # If this is a GET redirect, we still want to redirect the user to a success page
+            if request.method == "GET":
+                return RedirectResponse(url=f"{settings.FRONTEND_REDIRECT_URL}?status=success&payment_id={found_payment.id}&issue=confirmation_failed")
+
+    # For GET requests, redirect the user to the frontend
+    if request.method == "GET":
+        redirect_status = "success" if new_status == PaymentStatus.SUCCESS else "failed"
+        redirect_url = f"{settings.FRONTEND_REDIRECT_URL}?status={redirect_status}&payment_id={found_payment.id}"
+        logger.info("Redirecting user to frontend", redirect_url=redirect_url, service="payment")
+        return RedirectResponse(url=redirect_url)
 
     return {"message": "Webhook processed successfully"}
 

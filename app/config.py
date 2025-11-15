@@ -14,8 +14,13 @@ class Settings(BaseSettings):
     ENCRYPTION_KEY: str #
     REDIS_URL: str #
 
+    # Fixed Payment Settings
+    FIXED_AMOUNT: int = 500
+    CURRENCY: str = "ETB"
+
     # Chapa specific settings
     CHAPA_BASE_URL: str = "https://api.chapa.co/v1"
+    CHAPA_TEST_MODE: bool = True # Set to True to use Chapa sandbox/test keys
     CHAPA_WEBHOOK_URL: str = "/api/v1/webhook/chapa" 
     JWT_ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30

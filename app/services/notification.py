@@ -31,7 +31,7 @@ class NotificationService:
             "en": {
                 "payment_initiated": {
                     "subject": "Payment Initiated - Action Required",
-                    "message": "Dear Landlord, your payment for property {property_id} has been initiated. Please complete the payment of 100 ETB via CBE Birr or HelloCash using the link: {payment_link}"
+                    "message": f"Dear Landlord, your payment for property {{property_id}} has been initiated. Please complete the payment of {settings.FIXED_AMOUNT} {settings.CURRENCY} via CBE Birr or HelloCash using the link: {{payment_link}}"
                 },
                 "payment_success": {
                     "subject": "Payment Successful!",
@@ -53,7 +53,7 @@ class NotificationService:
             "am": {
                 "payment_initiated": {
                     "subject": "ክፍያ ተጀምሯል - እርምጃ ያስፈልጋል",
-                    "message": "ውድ የቤት ባለቤት፣ ለንብረትዎ {property_id} ክፍያ ተጀምሯል። እባክዎ 100 ብር በ CBE Birr ወይም HelloCash በዚህ ሊንክ ያጠናቅቁ፡ {payment_link}"
+                    "message": f"ውድ የቤት ባለቤት፣ ለንብረትዎ {{property_id}} ክፍያ ተጀምሯል። እባክዎ {settings.FIXED_AMOUNT} {settings.CURRENCY} በ CBE Birr ወይም HelloCash በዚህ ሊንክ ያጠናቅቁ፡ {{payment_link}}"
                 },
                 "payment_success": {
                     "subject": "ክፍያ ተሳክቷል!",
@@ -75,7 +75,7 @@ class NotificationService:
             "om": {
                 "payment_initiated": {
                     "subject": "Kaffaltiin Jalqabameera - Tarkaanfii Barbaachisaadha",
-                    "message": "Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {property_id} jalqabameera. Maaloo kaffaltii 100 ETB CBE Birr ykn HelloCashn linkii kanaan xumuraa: {payment_link}"
+                    "message": f"Jiraataa kabajamaa, kaffaltiin keessan kan qabeenya {{property_id}} jalqabameera. Maaloo kaffaltii {settings.FIXED_AMOUNT} {settings.CURRENCY} CBE Birr ykn HelloCashn linkii kanaan xumuraa: {{payment_link}}"
                 },
                 "payment_success": {
                     "subject": "Kaffaltiin Milkaa'eera!",

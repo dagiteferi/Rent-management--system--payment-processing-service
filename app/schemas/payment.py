@@ -10,7 +10,7 @@ class PaymentBase(BaseModel):
     request_id: uuid.UUID = Field(default_factory=uuid.uuid4) # Added for idempotency
     property_id: uuid.UUID
     user_id: uuid.UUID
-    amount: float = Field(default=100.00, ge=0)
+    amount: float = Field(default=500.00, ge=0, json_schema_extra={"examples": [500.00]}) # Re-added amount
 
 class PaymentCreate(PaymentBase):
     pass
@@ -25,6 +25,8 @@ class PaymentResponse(PaymentBase):
     chapa_tx_ref: str # This will be encrypted in DB, but for response, we might decrypt or omit
     created_at: datetime
     updated_at: datetime
+    failure_reason: Optional[str] = None
+    approved_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
@@ -35,7 +37,7 @@ class ChapaInitializeRequest(BaseModel):
     email: str
     first_name: str
     last_name: str
-    phone_number: str
+    phone_number: Optional[str] = None # Changed from mobile to phone_number, and made optional
     tx_ref: str
     callback_url: str
     return_url: str
